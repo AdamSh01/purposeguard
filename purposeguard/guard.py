@@ -40,6 +40,14 @@ _FALLBACK_ACTIONS = (RecommendedAction.REDIRECT, RecommendedAction.BLOCK)
 DEFAULT_FALLBACK_TEMPLATE = "I can only help with {purpose}. I can't help with {blocked_topic}."
 DEFAULT_FALLBACK_GENERIC = "I can only help with {purpose}."
 
+# Default blocked-anchor trip threshold, calibrated on the TRAIN domains (router +
+# wellness) by benchmark/calibrate.py: ~95th percentile of legit in-domain vs
+# OFF-scope similarity (~0.41) plus margin, staying below real blocked-topic
+# content (~0.49+). DECOUPLED from the alignment threshold on purpose: reusing the
+# low alignment threshold (~0.15) made near-domain blocked anchors over-flag
+# legitimate in-domain traffic (the v0.2.0 footgun; see benchmark/RESULTS.md).
+DEFAULT_BLOCKED_THRESHOLD = 0.46
+
 # Optional LLM judge: a function (content, purpose) -> bool ("is this on-mission?").
 # The library never ships one — the user supplies it if they want a second
 # opinion on borderline scores. Keeping it injectable means no API dependency
@@ -96,7 +104,11 @@ class PurposeGuard:
             `blocked_threshold` to make blocked hits stricter (fewer false flags,
             weaker camouflage coverage). The logic is deliberately not softened.
         blocked_threshold: similarity-to-a-blocked-topic at/above which a write is
-            flagged. Defaults to `threshold`. The tuning lever for the tradeoff above.
+            flagged. Defaults to DEFAULT_BLOCKED_THRESHOLD (~0.46), calibrated on
+            TRAIN so near-domain blocked anchors don't fire on legitimate in-domain
+            writes. DECOUPLED from `threshold` on purpose: the alignment threshold
+            (~0.15) is far too low for blocked anchors and over-flags. Tuning lever
+            for the conservatism tradeoff above.
         mode: what the guard RECOMMENDS on an off-scope (FLAG) write. "monitor"
             (DEFAULT) = flag only, exactly v0.1/Step-1 behavior; "redirect" =
             recommend replacing the output with a safe fallback; "block" =
@@ -130,7 +142,7 @@ class PurposeGuard:
         self._allowed_topics = [t.strip() for t in (allowed_topics or []) if t and t.strip()]
         self._blocked_topics = [t.strip() for t in (blocked_topics or []) if t and t.strip()]
         self.blocked_threshold = (
-            self.threshold if blocked_threshold is None else blocked_threshold
+            DEFAULT_BLOCKED_THRESHOLD if blocked_threshold is None else blocked_threshold
         )
         if mode not in _VALID_MODES:
             raise ValueError(f"mode must be one of {_VALID_MODES!r}, got {mode!r}")

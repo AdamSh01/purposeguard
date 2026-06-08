@@ -6,6 +6,8 @@ cleanly. Combination logic under test:
   blocked_hit = sim(content, any blocked) >= blocked_threshold  -> FLAG (overrides)
 """
 
+import pytest
+
 from purposeguard import Decision, LexicalScorer, PurposeGuard
 
 PURPOSE = "billing payment subscription invoice refund charge"
@@ -16,6 +18,10 @@ ALLOWED = ["account profile settings preferences notifications"]
 def guard(**kw):
     kw.setdefault("scorer", LexicalScorer())
     kw.setdefault("threshold", 0.12)
+    # Mechanism tests on LEXICAL scores: set an explicit blocked_threshold suited
+    # to lexical overlap. (The library default ~0.46 is calibrated for the
+    # embedding scorer; see test_blocked_threshold_default_is_decoupled.)
+    kw.setdefault("blocked_threshold", 0.3)
     return PurposeGuard(PURPOSE, **kw)
 
 
@@ -77,6 +83,47 @@ def test_blocked_hit_does_not_feed_the_drift_meter():
     # The meter recorded the (high) alignment, not a low blocked score:
     assert g.drift().current == v.score
     assert v.score >= g.threshold
+
+
+def test_blocked_threshold_default_is_decoupled_from_alignment_threshold():
+    """Regression for the v0.2.0 footgun: blocked_threshold must NOT default to the
+    (low) alignment threshold; it has its own, higher, TRAIN-calibrated default."""
+    from purposeguard.guard import DEFAULT_BLOCKED_THRESHOLD
+
+    g = PurposeGuard(PURPOSE, scorer=LexicalScorer(), threshold=0.12, blocked_topics=["x"])
+    assert g.blocked_threshold == DEFAULT_BLOCKED_THRESHOLD
+    assert g.blocked_threshold > g.threshold          # decoupled, and higher
+    assert DEFAULT_BLOCKED_THRESHOLD >= 0.4           # clearly above the ~0.15 alignment band
+
+
+def test_legit_in_domain_write_not_overflagged_by_near_domain_blocked_anchor():
+    """Regression (embedding): at the DEFAULT blocked_threshold, a NEAR-domain
+    blocked anchor must not fire on legitimate in-domain writes (the v0.2.0 bug
+    over-flagged 7/10 billing writes). Embedding-specific, so importorskip."""
+    import warnings
+
+    pytest.importorskip("sentence_transformers")
+    from purposeguard import EmbeddingScorer
+
+    scorer = EmbeddingScorer()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        scorer.score("probe", "probe")
+    if getattr(scorer, "_fallback", None) is not None:
+        pytest.skip("embedding model unavailable")
+
+    g = PurposeGuard(  # blocked_threshold defaults to the calibrated ~0.46
+        "A customer-support assistant for billing, payments, invoices, and refunds",
+        scorer=scorer,
+        blocked_topics=["legal advice"],  # near-domain to billing disputes
+    )
+    legit = [
+        "Issued a refund for the duplicate invoice on the customer's account.",
+        "Updated the payment card on file for the monthly subscription.",
+        "Explained why the latest invoice was higher this billing cycle.",
+    ]
+    wrongly_blocked = [w for w in legit if g.check(w).decision == Decision.FLAG]
+    assert wrongly_blocked == [], f"legit in-domain writes wrongly blocked: {wrongly_blocked}"
 
 
 def test_blocked_threshold_override():

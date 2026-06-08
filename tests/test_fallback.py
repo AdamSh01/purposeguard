@@ -17,6 +17,9 @@ ON = "issued a refund for the duplicate invoice payment charge"   # in scope
 def guard(**kw):
     kw.setdefault("scorer", LexicalScorer())
     kw.setdefault("threshold", 0.12)
+    # Mechanism tests on LEXICAL scores: explicit blocked_threshold suited to
+    # lexical overlap (the library default ~0.46 is embedding-calibrated).
+    kw.setdefault("blocked_threshold", 0.3)
     return PurposeGuard(PURPOSE, **kw)
 
 

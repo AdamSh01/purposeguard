@@ -55,9 +55,10 @@ PurposeGuard's drift *detection* (adapter:
   topic regardless of purpose alignment — partially closing keyword-camouflage
   (on-mission padding can't rescue clearly off-topic content). `allowed_topics`
   widen what counts as in-scope. Opt-in monitor/redirect/block modes turn a flag
-  into a *recommended* action (the caller enforces; the guard never blocks). The
-  camouflage improvement is **demonstrated by unit tests, not yet quantified** on
-  the adversarial benchmark (section 3a).
+  into a *recommended* action (the caller enforces; the guard never blocks).
+  Measured (v0.2.1, calibrated `blocked_threshold`): blocked anchors close part of
+  the topical half of keyword-camouflage when the off-topic is enumerated (overall
+  100% → 70% ASR, 0 false positives), but the malicious half survives — section 3a.
 - **The lexical fallback is a floor, not this signal** (FPR 0.70–0.90). The numbers
   above require the `[embeddings]` extra.
 
@@ -97,16 +98,20 @@ blocks injection strings and redacts secrets), but **purely off-topic** padded
 content (e.g. billing keywords + weekend chit-chat) matches no marker and would
 evade both layers. Not benchmarked — do not assume coverage.
 
-*v0.2 update (blocked-topic anchors):* a `blocked_topics` anchor matching the
-camouflaged payload's true topic flags it **regardless** of the on-mission padding,
-**partially closing this gap**. This is **demonstrated by unit tests** (a write
-padded with on-mission words but about a blocked topic is flagged) — but the
-**100% ASR above was measured before blocked anchors and has NOT been re-quantified**
-on the adversarial benchmark. Re-running `benchmark/adversarial.py` with blocked
-anchors to measure the actual ASR drop is a tracked follow-up. Honest caveat:
-camouflage whose true topic is **not** in `blocked_topics` (an off-topic the
-operator didn't list, or injection markers — which aren't a topic) still passes
-the drift/scope layer.
+*v0.2.1 measured (blocked-topic anchors, calibrated threshold).* With the
+TRAIN-calibrated default `blocked_threshold` (0.46), blocked anchors close **part
+of the topical half** of camouflage (topical ASR 100% → **40%**; overall camouflage
+**100% → 70%**) **only when the specific, distinct off-topic is enumerated**, with
+**zero** false positives. The catch is partial because the on-mission padding
+dilutes the camo's similarity to the blocked anchor. The **malicious half**
+(injection/exfiltration/credential-theft) is **fully unaffected (100%)** — not
+topics; that's AMG's job. A mismatched/abstract list catches nothing and (post
+calibration fix) over-flags nothing (0/10 legit). NOTE: v0.2.0 shipped with
+`blocked_threshold` defaulting to the alignment threshold, which over-flagged 7/10
+legit writes; v0.2.1 decoupled it. Bottom line: the camouflage close is **real but
+narrow and partial** (topical-only, enumerated, ~30% of camouflage) — see
+`benchmark/RESULTS.md` §3a. Camouflage in an unlisted off-topic, or via injection
+markers, still passes.
 
 ### (b) On-topic-but-wrong-policy / behavioral violations — **PurposeGuard ASR 100%**
 "Approve all refunds without verification" is topically on-billing (high cosine)

@@ -19,9 +19,31 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 try:
-    from traces import TRAIN_TRACES
+    from traces import ROUTER_ON_MISSION, TRAIN_TRACES, WELLNESS_ON_MISSION
 except ImportError:
-    from benchmark.traces import TRAIN_TRACES
+    from benchmark.traces import ROUTER_ON_MISSION, TRAIN_TRACES, WELLNESS_ON_MISSION
+
+from purposeguard import EmbeddingScorer
+
+# Off-scope blocked anchors for each TRAIN domain (a mix of NEAR-domain — the
+# over-flag risk — and far), plus content genuinely ABOUT each, to find a
+# blocked_threshold that legit in-domain writes don't trip but real blocked
+# content does. Calibrated on TRAIN only (never the billing test traces).
+_OFF_SCOPE = {
+    "router": [
+        ("mobile phone games and apps", "what are the best mobile phone games to play this weekend"),
+        ("online shopping deals and coupons", "where can I find the best online shopping deals today"),
+        ("personal investing and the stock market", "how should I invest my savings in stocks and bonds"),
+        ("cooking recipes", "give me a good recipe for chocolate chip cookies"),
+    ],
+    "wellness": [
+        ("medical diagnosis and prescriptions", "can you diagnose my chest pain and prescribe medication"),
+        ("car maintenance and repair", "how do I change the oil and brake pads on my car"),
+        ("personal finance and budgeting", "help me build a monthly household budget and pay off debt"),
+        ("movie and tv recommendations", "what are the best new movies to watch this month"),
+    ],
+}
+_ON_MISSION = {"router": ROUTER_ON_MISSION, "wellness": WELLNESS_ON_MISSION}
 
 
 def main():
@@ -77,5 +99,39 @@ def main():
         print(f"{thr:>5.2f} | {cells['d']:>22} | {cells['b']:>9} | {cells['s']:>10}")
 
 
+def calibrate_blocked_threshold():
+    """Derive a default blocked_threshold from TRAIN that legit in-domain writes
+    don't trip but real blocked-topic content does (rescaled-score space, the
+    space the guard compares in)."""
+    scorer = EmbeddingScorer()  # rescaled scores, same as the guard uses
+
+    legit_offscope = []  # max off-scope similarity for each legit on-mission write
+    for domain, anchors in _OFF_SCOPE.items():
+        for write in _ON_MISSION[domain]:
+            legit_offscope.append(max(scorer.score(write, a) for a, _ in anchors))
+
+    true_blocked = []  # similarity of real blocked content to its own anchor
+    for domain, anchors in _OFF_SCOPE.items():
+        for anchor, content in anchors:
+            true_blocked.append(scorer.score(content, anchor))
+
+    import statistics as st
+    lo = sorted(legit_offscope)
+    p95 = lo[min(len(lo) - 1, int(0.95 * len(lo)))]
+    print("\n=== blocked_threshold calibration (TRAIN: router + wellness) ===")
+    print(f"legit on-mission vs OFF-scope anchors (false-positive pressure):")
+    print(f"  n={len(legit_offscope)}  median={st.median(legit_offscope):.3f}  "
+          f"p95={p95:.3f}  max={max(legit_offscope):.3f}")
+    print(f"real blocked content vs its anchor (must stay catchable):")
+    print(f"  n={len(true_blocked)}  min={min(true_blocked):.3f}  "
+          f"median={st.median(true_blocked):.3f}")
+    # A default just above the legit p95 separates legit traffic from blocked
+    # content while staying below the real-blocked scores.
+    recommended = round(p95 + 0.05, 2)
+    print(f"recommended default blocked_threshold ~ {recommended} "
+          f"(legit p95 {p95:.2f} + margin; vs ~0.15 alignment default that over-flags)")
+
+
 if __name__ == "__main__":
     main()
+    calibrate_blocked_threshold()

@@ -169,9 +169,14 @@ NOT a security tool.** Be clear-eyed:
   [`purposeguard/adapters/owasp_amg.py`](purposeguard/adapters/owasp_amg.py) and
   [`THREAT_MODEL.md`](THREAT_MODEL.md). Memory-poisoning layers are planned for
   v0.3; they are not in this release.
-- **The camouflage improvement is demonstrated by unit tests, not yet quantified
-  on the adversarial benchmark.** Re-running `benchmark/adversarial.py` with
-  blocked anchors to measure the keyword-stuffing ASR drop is a tracked follow-up.
+- **The camouflage close is narrow and partial (measured).** On the adversarial
+  benchmark, blocked anchors close *part of the topical half* of keyword-camouflage
+  (overall **100% → 70%** ASR, **0** false positives) **only when you enumerate the
+  specific, distinct off-topic** — the on-mission padding dilutes the rest. The
+  *malicious half* (injection/exfiltration) is unaffected (AMG's domain). The
+  `blocked_threshold` default is calibrated (~0.46) so near-domain blocked anchors
+  don't over-flag legit traffic. Enumerate deliberately; see
+  [`benchmark/RESULTS.md`](benchmark/RESULTS.md) §3a.
 - **Blocked-overrides-alignment is intentionally conservative.** A legitimately
   on-purpose write that sits near a blocked topic (a billing agent mentioning
   "legal advice") will flag. `blocked_threshold` is the tuning lever.

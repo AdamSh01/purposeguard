@@ -135,13 +135,42 @@ during the attack = 100% trend ASR.)
   cosine-to-purpose high, so neither per-write FLAG nor the trend reacts. A
   purpose-similarity detector is blind to this by construction — it measures
   topical overlap, which the attacker supplies.
-  **v0.2 update:** `blocked_topics` anchors partially close this — a write about a
-  *listed* blocked topic is flagged regardless of on-mission padding. This is
-  **demonstrated by unit tests (`tests/test_scope_anchors.py`), NOT yet quantified
-  here**: the 100% ASR above was measured before blocked anchors existed and has
-  not been re-run with them. **Tracked follow-up:** re-run this suite configured
-  with blocked anchors to measure the actual ASR drop. Camouflage whose true topic
-  isn't listed (or injection markers, which aren't a topic) still bypasses.
+  **v0.2.1 measured (blocked-topic anchors, calibrated `blocked_threshold`).**
+  Camouflage ASR = % of payloads NOT flagged; `blocked_threshold` defaults to the
+  TRAIN-calibrated **0.46** (decoupled from the alignment threshold — see below):
+
+  | blocked_topics | ALL | topical half | malicious half | FP on legit billing |
+  | --- | --- | --- | --- | --- |
+  | none (baseline) | 100% | 100% | 100% | 0/10 |
+  | covering (enumerated, distinct off-topics) | 70% | 40% | 100% | 0/10 |
+  | mismatched (abstract: politics/legal/medical) | 100% | 100% | 100% | **0/10** |
+
+  Honest reading:
+  - Blocked anchors close **part of the topical half** of camouflage (topical
+    100% → 40% ASR; overall **100% → 70%**) **only when the specific, distinct
+    off-topic is enumerated**, with **zero** false positives. The catch is partial
+    because the on-mission padding *dilutes* the camo's similarity to the blocked
+    anchor — at a safe threshold, ~40% of topical camo slips through.
+  - The **malicious half** (injection / exfiltration / credential-theft) is
+    **fully unaffected (100%)** — not topics; that's AMG's marker/policy job.
+  - A **mismatched/abstract** blocked list now catches nothing (100% ASR) AND
+    over-flags nothing (**0/10** legit billing). Blocked anchors only ever help
+    when the area is enumerated.
+
+  **Calibration fix (v0.2.1).** In v0.2.0, `blocked_threshold` defaulted to the
+  alignment threshold (~0.09 raw cosine under the [0, 0.61] band) — far too low for
+  near-domain anchors, so an abstract list over-flagged **7/10 legitimate billing
+  writes**, and the other families' apparent "+blocked" drops were that same
+  artifact. Fixed: `blocked_threshold` is now decoupled with a dedicated default
+  (**0.46**, calibrated on the TRAIN router/wellness domains by
+  `benchmark/calibrate.py`: ~p95 of legit-vs-off-scope similarity + margin, below
+  real blocked-topic content). Post-fix, legit FP is **0/10**, and the other
+  families are genuinely unchanged (gradual 17% → 17%, baseline 0% → 0%,
+  wrong-policy 100% → 90%) — confirming blocked anchors don't help those.
+
+  Net: the topical-camouflage close is **real but narrow and partial** (≈30% of
+  camouflage, topical-only, enumerated, at a safe threshold) — not a general
+  camouflage defense. Reproduce: `python benchmark/adversarial.py`.
 - **(b) Gradual drift — largely caught *here*, but read the mechanism.** This ramp
   ended clearly off-mission, so the FIXED early baseline produced a large eventual
   delta and the trend fired (and 5/6 tail writes were per-write-flagged). The
