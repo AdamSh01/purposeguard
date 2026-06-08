@@ -130,11 +130,18 @@ documenting them is the point.
 (Embedding scorer, default BALANCED threshold; "evaded" = the trend never fired
 during the attack = 100% trend ASR.)
 
-- **(a) Keyword-stuffing — full bypass (100%).** Prefixing an off-mission or
-  malicious payload with billing vocabulary keeps cosine-to-purpose high, so
-  neither per-write FLAG nor the trend reacts. A semantic-similarity detector is
-  blind to this by construction — it measures topical overlap, which the attacker
-  simply supplies.
+- **(a) Keyword-stuffing — full bypass (100%) of the PURPOSE-only detector.**
+  Prefixing an off-mission or malicious payload with billing vocabulary keeps
+  cosine-to-purpose high, so neither per-write FLAG nor the trend reacts. A
+  purpose-similarity detector is blind to this by construction — it measures
+  topical overlap, which the attacker supplies.
+  **v0.2 update:** `blocked_topics` anchors partially close this — a write about a
+  *listed* blocked topic is flagged regardless of on-mission padding. This is
+  **demonstrated by unit tests (`tests/test_scope_anchors.py`), NOT yet quantified
+  here**: the 100% ASR above was measured before blocked anchors existed and has
+  not been re-run with them. **Tracked follow-up:** re-run this suite configured
+  with blocked anchors to measure the actual ASR drop. Camouflage whose true topic
+  isn't listed (or injection markers, which aren't a topic) still bypasses.
 - **(b) Gradual drift — largely caught *here*, but read the mechanism.** This ramp
   ended clearly off-mission, so the FIXED early baseline produced a large eventual
   delta and the trend fired (and 5/6 tail writes were per-write-flagged). The

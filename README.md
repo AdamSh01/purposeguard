@@ -1,39 +1,56 @@
 # PurposeGuard
 
-**Detect when an AI agent forgets its purpose.**
+**A drift + scope guardrail — keep your AI agent in its lane.**
 
-Agents that run for a while drift. Session history piles up, memories get
-consolidated, and the agent slowly starts answering off-mission — a billing
-assistant that wanders into recipes and weather. PurposeGuard scores every
-memory write against the agent's *declared purpose* and surfaces drift as a
-single watchable number, before your users notice the agent has lost the plot.
+Customer-facing agents wander. Session history piles up and the agent slowly
+answers off-mission — a billing assistant that drifts into recipes, weather, or
+legal advice. PurposeGuard scores every write and response against the agent's
+declared **purpose** (and optional **allowed** / **blocked** topics), surfaces
+drift as a watchable number, and — when you opt in — tells your caller to redirect
+or block off-scope output. The guard *recommends*; your code decides.
 
-- **Framework-agnostic.** Works with Mem0, LangChain, a raw vector store, or a
-  plain script. A "write" is just text — feed it from anywhere.
-- **Detection-first, safe by default.** v0.1 only ever *flags*; it never blocks,
-  mutates, or drops your data. You can't break your agent by adding it.
-- **Easy to adopt.** `pip install purposeguard`, one line to construct, one line
-  to check. Runs offline with zero model downloads (a local-embedding upgrade is
-  one extra install away).
+- **Drift + scope.** Catch gradual drift (a trend) AND hard scope violations
+  (a write clearly about a blocked topic) — even when on-mission vocabulary is
+  used to camouflage it.
+- **Safe by default, explicit to enforce.** `monitor` mode (the default) only
+  *flags* — it never blocks, mutates, or drops your data. `redirect`/`block` are
+  opt-in, and even then the guard returns a *recommended action*; your code
+  enforces it. You can't break your agent by adding it.
+- **Framework-agnostic & easy to adopt.** Mem0, LangChain, a raw store, or a
+  plain script. `pip install`, one line to construct, one line to check.
+- **Honest about scope.** A drift + scope guardrail, **not a security tool** —
+  see [Honest limitations](#honest-limitations).
 
 First, `pip install "purposeguard[embeddings]"` (the lexical-only base install is a
 rough fallback — see [Install](#install)).
 
 ```python
-from purposeguard import PurposeGuard
+from purposeguard import PurposeGuard, RecommendedAction
 
-# Uses local embeddings (from the [embeddings] extra). In production, pass
-# require_embeddings=True to fail loudly instead of silently dropping to the
-# rough lexical floor if the model isn't available:
 guard = PurposeGuard(
-    purpose="A customer-support agent for billing questions",
-    require_embeddings=True,
+    purpose="A customer-support agent for billing and payments",
+    allowed_topics=["invoices", "refunds", "subscriptions"],   # widen what counts as in-scope
+    blocked_topics=["legal advice", "medical advice"],         # hard out-of-scope
+    mode="redirect",             # monitor (default) | redirect | block
+    require_embeddings=True,     # fail loud rather than ship on the lexical floor
 )
 
-verdict = guard.check("How do I bake sourdough bread?")
-print(verdict)            # Verdict(flag, score=0.08, reason='alignment 0.08 below threshold 0.15')
-print(guard.drift())      # DriftReading(current=..., baseline=..., drift=..., n=...)
+verdict = guard.check_response(
+    user_input="my invoice looks wrong — also, can you give me legal advice?",
+    response="Sure, for your lawsuit here's the legal advice you need...",
+)
+print(verdict.decision.value)            # 'flag'      -> detection: off scope
+print(verdict.recommended_action.value)  # 'redirect'  -> what to do, given the mode
+print(verdict.fallback)                  # "I can only help with ... I can't help with legal advice."
+print(guard.drift())                     # DriftReading(current=..., baseline=..., drift=..., n=...)
+
+# The guard never sends the fallback or stops anything — YOUR code enforces:
+if verdict.recommended_action is RecommendedAction.REDIRECT:
+    response = verdict.fallback
 ```
+
+`monitor` mode (the default) is exactly the v0.1 behavior — flag only, never block
+— so upgrading changes nothing until you opt into a mode.
 
 ## Install
 
@@ -63,6 +80,15 @@ once and falls back to lexical instead of crashing.
    falls meaningfully below the agent's own baseline, it flags `DRIFTING`.
 4. **Re-anchor** long contexts by re-injecting the purpose at the front *and*
    back (beating the U-shaped attention curve), so the agent stays on-mission.
+5. **Scope it** with `allowed_topics` (widen what counts as in-scope) and
+   `blocked_topics` (hard out-of-scope). A write clearly about a blocked topic is
+   flagged **even when padded with on-mission vocabulary** — partially closing
+   keyword-camouflage. A blocked hit is an immediate flag, not gradual drift, so
+   it doesn't feed the drift meter.
+6. **Choose a mode** — `monitor` (default, flag only), `redirect` (the verdict
+   carries a `fallback` message), or `block` (the verdict signals stop). The guard
+   only ever returns a `recommended_action`; **your code enforces it** — the guard
+   never blocks, mutates, or drops anything itself.
 
 ## See it catch drift
 
@@ -104,8 +130,9 @@ The two feed **separate** drift meters on purpose, so a healthy memory stream
 can't mask drifting answers (or vice versa) — and you can attribute drift to
 *memory* vs *live answers*. `user_input` is recorded as context but doesn't change
 the score: a billing agent that answers a weather question has drifted regardless
-of what it was asked. Like everything in v0.1, `check_response` only ever flags —
-it never blocks.
+of what it was asked. By default (`monitor` mode) `check_response` only flags;
+opt into `redirect`/`block` for an enforcement *recommendation* (your code still
+acts — the guard never blocks or mutates anything).
 
 ## Adapters & examples
 
@@ -129,22 +156,45 @@ lexical floor):
 
 ## Honest limitations
 
-PurposeGuard is a **heuristic reliability guardrail, not a proof and not a
-security boundary.**
+PurposeGuard is a **drift + scope guardrail — "keep your agent in its lane" —
+NOT a security tool.** Be clear-eyed:
 
-- "On-mission" is a tunable threshold. Legitimately broad agents will produce
-  false positives — lower the threshold, or use the optional LLM judge for
-  borderline cases.
-- The lexical fallback scorer is a *floor*, not a ceiling: it keys on word
-  overlap and misses paraphrase. Install the `embeddings` extra for real use.
-- Drift detection depends on a stable baseline. If your agent is off-mission
-  from the very first writes, there's no good baseline to drift *from* — set the
-  purpose and baseline window deliberately.
+- **It catches topical drift and scope violations, not security threats.**
+  Blocked-topic anchors flag content that is *about* a forbidden topic, and
+  **partially** close keyword-camouflage (on-mission padding can't rescue clearly
+  off-topic content). They do **NOT** catch on-topic-but-wrong-*policy*
+  (e.g. "approve all refunds without verification" — topically billing,
+  behaviorally wrong) or adversarial injection. For those, **compose with OWASP
+  Agent Memory Guard** (markers/policy enforcement) — see
+  [`purposeguard/adapters/owasp_amg.py`](purposeguard/adapters/owasp_amg.py) and
+  [`THREAT_MODEL.md`](THREAT_MODEL.md). Memory-poisoning layers are planned for
+  v0.3; they are not in this release.
+- **The camouflage improvement is demonstrated by unit tests, not yet quantified
+  on the adversarial benchmark.** Re-running `benchmark/adversarial.py` with
+  blocked anchors to measure the keyword-stuffing ASR drop is a tracked follow-up.
+- **Blocked-overrides-alignment is intentionally conservative.** A legitimately
+  on-purpose write that sits near a blocked topic (a billing agent mentioning
+  "legal advice") will flag. `blocked_threshold` is the tuning lever.
+- **"On-mission" is a tunable threshold.** Broad agents produce false positives —
+  use a preset, lower the threshold, add `allowed_topics`, or the optional judge.
+- **The lexical fallback is a floor, not a ceiling.** It keys on word overlap,
+  misses paraphrase, and is weaker at camouflage. Install the `embeddings` extra.
+- **Drift needs a stable baseline.** If the agent is off-mission from the first
+  writes there's nothing to drift from — and an attacker controlling the early
+  writes can poison the baseline (the per-write scope check still applies; the
+  trend does not). See THREAT_MODEL.md.
+- **Not a proof.** It raises the cost of drift and scope violations; it does not
+  guarantee their absence.
 
 ## Configuration that matters
 
 | Option | What it does |
 | --- | --- |
+| `allowed_topics` | In-scope topics that *widen* what counts as on-mission (alignment = max over purpose + allowed). Optional. |
+| `blocked_topics` | Forbidden topics. A write similar to any of these is flagged regardless of purpose alignment (blocked overrides). Optional. |
+| `blocked_threshold` | Similarity to a blocked topic at/above which it flags. Defaults to `threshold`; raise to reduce false flags. |
+| `mode` | `monitor` (default, flag only) / `redirect` (verdict carries `fallback`) / `block` (verdict signals stop). Recommendation only — the caller enforces. |
+| `fallback_template` / `fallback_template_generic` | Messages rendered into `verdict.fallback` for blocked-hit vs low-alignment flags. Fields: `{purpose}`, `{blocked_topic}`, `{reason}`. |
 | `threshold` | Alignment below this is flagged. Defaults to the `BALANCED` preset. Lower for broad agents (see presets below). |
 | `drift_baseline_window` | How many early writes set the "normal" baseline. Lock it in *before* drift can start. |
 | `drift_alpha` | EMA reactivity. Higher = reacts faster to recent writes. |
@@ -185,15 +235,20 @@ FLAG as a tag, not a verdict. See [`benchmark/RESULTS.md`](benchmark/RESULTS.md)
 
 ## Roadmap
 
-- **v0.1 (this release)** — purpose-drift detection, drift meter, re-anchoring,
-  framework-agnostic core, offline-safe.
-- **v0.2** — a poisoning detector on the same core: swap the reference from
-  "purpose" to "existing-memory consensus" to catch adversarial,
-  semantically-clean-looking writes that marker-based tools miss. Composes with
-  [OWASP Agent Memory Guard](https://github.com/OWASP/www-project-agent-memory-guard).
+- **v0.1** — purpose-drift detection, drift meter, re-anchoring, response-level
+  drift, framework-agnostic core, offline-safe.
+- **v0.2 (this release)** — **drift + scope guardrail**: allowed/blocked-topic
+  anchors (partially closing keyword-camouflage), opt-in monitor/redirect/block
+  modes (the guard recommends, the caller acts), and suggested fallback messages.
+  Composition with [OWASP Agent Memory Guard](https://github.com/OWASP/www-project-agent-memory-guard)
+  for marker/policy poisoning enforcement.
+- **v0.3 (planned, not yet built)** — memory-poisoning layers: an
+  existing-memory **consensus** reference to catch adversarial, semantically-clean
+  writes that markers miss, composed with OWASP AMG. (Note: a consensus reference
+  is itself poisonable if the attacker controls the existing memories — see
+  THREAT_MODEL.md.)
 - **Later (opt-in, experimental)** — cryptographic write provenance
-  (tamper-evident log + trusted timestamps) for forensic attribution. Clearly
-  labeled `experimental/`; never required to use the guard.
+  (tamper-evident log + trusted timestamps) for forensic attribution.
 
 ## License
 

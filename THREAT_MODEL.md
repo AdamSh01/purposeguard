@@ -28,7 +28,9 @@ PurposeGuard's drift *detection* (adapter:
   allow / redact / block / quarantine.
 
 **Out of scope (neither layer, see section 3 for measurements):**
-- Semantic camouflage that keeps topical similarity high (keyword-stuffing).
+- Semantic camouflage (keyword-stuffing) whose true topic is NOT a declared
+  blocked topic. A *listed* blocked topic now partially catches it (v0.2; section
+  3a), but unlisted off-topics and injection markers still pass.
 - On-topic-but-wrong-*policy* / behavioral violations (similarity can't see them).
 - Poisoning of the *relative* drift baseline (and, by extension, any future
   consensus reference).
@@ -49,6 +51,13 @@ PurposeGuard's drift *detection* (adapter:
   recall 1.00; at the recommended NARROW preset, FPR 0.07 / precision 0.94 (the
   honest, de-overfit numbers). The per-write check is what survives baseline
   poisoning (section 3c).
+- **Scope anchors (v0.2).** `blocked_topics` flag content *about* a forbidden
+  topic regardless of purpose alignment — partially closing keyword-camouflage
+  (on-mission padding can't rescue clearly off-topic content). `allowed_topics`
+  widen what counts as in-scope. Opt-in monitor/redirect/block modes turn a flag
+  into a *recommended* action (the caller enforces; the guard never blocks). The
+  camouflage improvement is **demonstrated by unit tests, not yet quantified** on
+  the adversarial benchmark (section 3a).
 - **The lexical fallback is a floor, not this signal** (FPR 0.70–0.90). The numbers
   above require the `[embeddings]` extra.
 
@@ -87,6 +96,17 @@ camouflage payloads that *carry* injection markers or secrets (Step-0 showed AMG
 blocks injection strings and redacts secrets), but **purely off-topic** padded
 content (e.g. billing keywords + weekend chit-chat) matches no marker and would
 evade both layers. Not benchmarked — do not assume coverage.
+
+*v0.2 update (blocked-topic anchors):* a `blocked_topics` anchor matching the
+camouflaged payload's true topic flags it **regardless** of the on-mission padding,
+**partially closing this gap**. This is **demonstrated by unit tests** (a write
+padded with on-mission words but about a blocked topic is flagged) — but the
+**100% ASR above was measured before blocked anchors and has NOT been re-quantified**
+on the adversarial benchmark. Re-running `benchmark/adversarial.py` with blocked
+anchors to measure the actual ASR drop is a tracked follow-up. Honest caveat:
+camouflage whose true topic is **not** in `blocked_topics` (an off-topic the
+operator didn't list, or injection markers — which aren't a topic) still passes
+the drift/scope layer.
 
 ### (b) On-topic-but-wrong-policy / behavioral violations — **PurposeGuard ASR 100%**
 "Approve all refunds without verification" is topically on-billing (high cosine)

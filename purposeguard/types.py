@@ -14,16 +14,36 @@ from typing import Any, Optional
 
 
 class Decision(str, Enum):
-    """What the guard concluded about a write.
+    """The guard's DETECTION outcome for a write: is it in scope?
 
-    v0.1 is detection-first, so the guard only ever returns ALLOW or FLAG.
-    BLOCK exists in the enum so adapters can be written against the full set,
-    but no v0.1 policy returns it — nothing can silently drop a user's data.
+    The guard only ever returns ALLOW or FLAG — `decision` is detection, not
+    enforcement. What the caller should DO about a FLAG (given the guard's mode)
+    is carried separately in `Verdict.recommended_action`, so even in block mode
+    `decision` stays ALLOW/FLAG and never BLOCK (guardrail #1: the guard
+    recommends, the caller enforces). BLOCK is kept in the enum for adapters that
+    map to a full action set; the guard itself does not emit it.
     """
 
     ALLOW = "allow"
     FLAG = "flag"
-    BLOCK = "block"  # reserved for opt-in enforcement (post-v0.1)
+    BLOCK = "block"  # not emitted by PurposeGuard; see Verdict.recommended_action
+
+
+class RecommendedAction(str, Enum):
+    """What the guard RECOMMENDS the caller do, given its mode. Advisory only —
+    PurposeGuard never acts on the caller's data; the caller reads this and
+    enforces (guardrail #1).
+
+    - ALLOW    : in scope; proceed (any mode).
+    - MONITOR  : off scope, mode=monitor; just log/observe (the v0.1 default).
+    - REDIRECT : off scope, mode=redirect; replace the output with a safe fallback.
+    - BLOCK    : off scope, mode=block; stop / suppress the off-scope output.
+    """
+
+    ALLOW = "allow"
+    MONITOR = "monitor"
+    REDIRECT = "redirect"
+    BLOCK = "block"
 
 
 @dataclass
@@ -57,16 +77,22 @@ class Verdict:
     """The guard's conclusion about one write.
 
     `score` is the alignment with the declared purpose in [0.0, 1.0], where 1.0
-    is perfectly on-mission. `decision` is the policy's action. `reason` is a
-    short human-readable explanation suitable for logging. `details` carries the
-    raw signals (similarity, judge result, threshold) for debugging and for the
-    forensic trail.
+    is perfectly on-mission. `decision` is the DETECTION outcome (ALLOW/FLAG).
+    `recommended_action` is what the guard recommends the caller DO about it given
+    the mode (advisory — the caller enforces; the guard never acts). `reason` is a
+    short human-readable explanation; `details` carries the raw signals (similarity,
+    blocked/allowed anchors, judge result, threshold, mode) for debugging/forensics.
+    `fallback` is a SUGGESTED safe replacement message, populated only when the
+    recommendation is REDIRECT or BLOCK — text the caller MAY use; the guard never
+    sends it (guardrail #1). It is None for ALLOW/MONITOR.
     """
 
     score: float
     decision: Decision
     reason: str
     details: dict[str, Any] = field(default_factory=dict)
+    recommended_action: RecommendedAction = RecommendedAction.ALLOW
+    fallback: Optional[str] = None
 
     @property
     def aligned(self) -> bool:

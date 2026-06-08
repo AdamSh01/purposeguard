@@ -22,7 +22,23 @@ from typing import Callable, Optional
 from .drift import DriftMeter, DriftReading
 from .presets import BALANCED, Preset, get_preset
 from .scoring import Scorer, resolve_scorer
-from .types import Decision, Verdict, Write
+from .types import Decision, RecommendedAction, Verdict, Write
+
+_VALID_MODES = ("monitor", "redirect", "block")
+# decision==FLAG -> what the guard RECOMMENDS, by mode (the caller enforces).
+_FLAG_ACTION_BY_MODE = {
+    "monitor": RecommendedAction.MONITOR,
+    "redirect": RecommendedAction.REDIRECT,
+    "block": RecommendedAction.BLOCK,
+}
+# The recommendations that suppress/replace the off-scope output, so a safe
+# fallback message is rendered for them. (monitor only observes; allow is fine.)
+_FALLBACK_ACTIONS = (RecommendedAction.REDIRECT, RecommendedAction.BLOCK)
+
+# Sane default fallback templates. Fields available to a custom template:
+# {purpose}, {blocked_topic} (the matched forbidden topic), {reason}.
+DEFAULT_FALLBACK_TEMPLATE = "I can only help with {purpose}. I can't help with {blocked_topic}."
+DEFAULT_FALLBACK_GENERIC = "I can only help with {purpose}."
 
 # Optional LLM judge: a function (content, purpose) -> bool ("is this on-mission?").
 # The library never ships one — the user supplies it if they want a second
@@ -37,6 +53,12 @@ class PurposeGuard:
         purpose: str,
         *,
         threshold: Optional[float] = None,
+        allowed_topics: Optional[list] = None,
+        blocked_topics: Optional[list] = None,
+        blocked_threshold: Optional[float] = None,
+        mode: str = "monitor",
+        fallback_template: str = DEFAULT_FALLBACK_TEMPLATE,
+        fallback_template_generic: str = DEFAULT_FALLBACK_GENERIC,
         scorer: Optional[Scorer] = None,
         require_embeddings: bool = False,
         judge: Optional[LLMJudge] = None,
@@ -53,6 +75,43 @@ class PurposeGuard:
             preset (calibrated for the EmbeddingScorer's rescaled scores). Use
             BROAD for wide-ranging agents and NARROW for single-purpose ones, or
             the `from_preset` constructor. See purposeguard/presets.py.
+        allowed_topics: optional in-scope topics that WIDEN what counts as
+            on-mission. A write's alignment is max(similarity-to-purpose,
+            best-similarity-to-an-allowed-topic), so content clearly on an allowed
+            topic passes even if it only loosely matches the purpose string.
+        blocked_topics: optional forbidden topics. A write whose similarity to ANY
+            blocked topic reaches `blocked_threshold` is FLAGged REGARDLESS of
+            purpose alignment (blocked OVERRIDES alignment). This partially closes
+            keyword-camouflage: on-mission vocabulary cannot rescue content that is
+            clearly about a blocked topic. A blocked hit is an immediate hard flag
+            and does NOT feed the drift meter (drift tracks purpose alignment, not
+            forbidden-topic hits). Absent allowed/blocked lists == exact v0.1
+            behavior.
+
+            KNOWN TRADEOFF (intentional, conservative): blocked-overrides-alignment
+            means a *legitimately on-purpose* write that sits semantically near a
+            blocked anchor will still flag — e.g. a billing agent that mentions
+            "legal advice" while otherwise staying on billing. We accept this
+            false-positive risk in exchange for camouflage resistance; raise
+            `blocked_threshold` to make blocked hits stricter (fewer false flags,
+            weaker camouflage coverage). The logic is deliberately not softened.
+        blocked_threshold: similarity-to-a-blocked-topic at/above which a write is
+            flagged. Defaults to `threshold`. The tuning lever for the tradeoff above.
+        mode: what the guard RECOMMENDS on an off-scope (FLAG) write. "monitor"
+            (DEFAULT) = flag only, exactly v0.1/Step-1 behavior; "redirect" =
+            recommend replacing the output with a safe fallback; "block" =
+            recommend stopping the off-scope output. Modes change ONLY the verdict's
+            `recommended_action`; the guard NEVER acts on, mutates, drops, or stops
+            the caller's data (guardrail #1) — the CALLER reads the recommendation
+            and enforces.
+        fallback_template: message rendered into `verdict.fallback` when a blocked
+            topic is matched and the recommendation is REDIRECT/BLOCK. Fields:
+            {purpose}, {blocked_topic}, {reason}. Default:
+            "I can only help with {purpose}. I can't help with {blocked_topic}."
+        fallback_template_generic: message used instead when the flag is low
+            alignment (no specific blocked topic). Fields: {purpose}, {reason}.
+            Default: "I can only help with {purpose}." The fallback is only ever a
+            SUGGESTION carried in the verdict; the guard never sends it.
         scorer: defaults to local embeddings if available, else lexical (which
             warns once — the floor is a fallback, not the intended experience).
         require_embeddings: opt-in. When True, the guard refuses to run silently
@@ -67,6 +126,17 @@ class PurposeGuard:
             raise ValueError("purpose must be a non-empty string")
         self._purpose = purpose.strip()
         self.threshold = BALANCED.threshold if threshold is None else threshold
+        # Scope anchors (fixed for the guard's lifetime, like the purpose).
+        self._allowed_topics = [t.strip() for t in (allowed_topics or []) if t and t.strip()]
+        self._blocked_topics = [t.strip() for t in (blocked_topics or []) if t and t.strip()]
+        self.blocked_threshold = (
+            self.threshold if blocked_threshold is None else blocked_threshold
+        )
+        if mode not in _VALID_MODES:
+            raise ValueError(f"mode must be one of {_VALID_MODES!r}, got {mode!r}")
+        self.mode = mode
+        self.fallback_template = fallback_template
+        self.fallback_template_generic = fallback_template_generic
         self.scorer = resolve_scorer(scorer, require_embeddings=require_embeddings)
         self.judge = judge
         self.judge_band = judge_band
@@ -100,6 +170,29 @@ class PurposeGuard:
         """Read-only. The purpose is fixed for the guard's lifetime."""
         return self._purpose
 
+    @property
+    def allowed_topics(self) -> tuple:
+        """Read-only in-scope topic anchors (fixed for the guard's lifetime)."""
+        return tuple(self._allowed_topics)
+
+    @property
+    def blocked_topics(self) -> tuple:
+        """Read-only forbidden topic anchors (fixed for the guard's lifetime)."""
+        return tuple(self._blocked_topics)
+
+    def _best_anchor(self, content: str, anchors: list):
+        """Best ``(score, anchor)`` of ``content`` over a list of topic anchors.
+
+        Reuses the SAME scorer as the purpose — anchors are just extra reference
+        strings, not a parallel scoring route. Returns ``(0.0, None)`` if empty.
+        """
+        best_score, best_anchor = 0.0, None
+        for anchor in anchors:
+            s = self.scorer.score(content, anchor)
+            if s > best_score:
+                best_score, best_anchor = s, anchor
+        return best_score, best_anchor
+
     def _evaluate(
         self,
         content: str,
@@ -110,33 +203,77 @@ class PurposeGuard:
     ) -> Verdict:
         """Shared score -> policy -> meter path for every kind of check.
 
-        Both check() and check_response() route through here so there is exactly
-        one scorer call, one threshold policy, and one (optional) judge step —
-        only the text being scored and which meter it feeds differ. This is what
-        keeps response checking from becoming a parallel scoring path.
-        """
-        score = self.scorer.score(content, self._purpose)
+        check() and check_response() both route through here, so there is exactly
+        one scoring route; only the text and the meter differ. Combination logic:
 
-        details: dict = {"similarity": score, "threshold": self.threshold}
+          alignment   = max(sim(content, purpose), best sim(content, allowed_topics))
+          blocked_hit = sim(content, any blocked_topic) >= blocked_threshold
+
+        A blocked hit FLAGs the write regardless of alignment (blocked overrides,
+        and the judge does not rescue it). Otherwise the write ALLOWs iff
+        alignment >= threshold (allowed topics having widened alignment). Only the
+        ALIGNMENT score feeds the drift meter — a blocked hit is a discrete hard
+        flag, not gradual drift.
+        """
+        purpose_score = self.scorer.score(content, self._purpose)
+        allowed_score, allowed_topic = self._best_anchor(content, self._allowed_topics)
+        alignment = max(purpose_score, allowed_score)
+
+        blocked_score, blocked_topic = self._best_anchor(content, self._blocked_topics)
+        blocked_hit = bool(self._blocked_topics) and blocked_score >= self.blocked_threshold
+
+        details: dict = {"similarity": alignment, "threshold": self.threshold}
         if extra_details:
             details.update(extra_details)
+        if self._allowed_topics:
+            details["allowed"] = {"score": allowed_score, "topic": allowed_topic}
+        if self._blocked_topics:
+            details["blocked"] = {
+                "score": blocked_score,
+                "topic": blocked_topic,
+                "threshold": self.blocked_threshold,
+                "hit": blocked_hit,
+            }
 
-        # Only consult the (optional) judge for borderline cases near the line.
-        # This is the cost-control move: embeddings handle the obvious 95%, the
-        # judge only arbitrates the ambiguous few.
-        decision = Decision.ALLOW if score >= self.threshold else Decision.FLAG
-        if self.judge is not None and abs(score - self.threshold) <= self.judge_band:
-            on_mission = bool(self.judge(content, self._purpose))
-            details["judge"] = on_mission
-            decision = Decision.ALLOW if on_mission else Decision.FLAG
-
-        if decision == Decision.ALLOW:
-            reason = f"alignment {score:.2f} meets threshold {self.threshold:.2f}"
+        if blocked_hit:
+            # Blocked overrides alignment; the judge does not rescue a blocked hit.
+            decision = Decision.FLAG
+            reason = (
+                f"matched blocked topic {blocked_topic!r} "
+                f"(similarity {blocked_score:.2f} >= {self.blocked_threshold:.2f})"
+            )
         else:
-            reason = f"alignment {score:.2f} below threshold {self.threshold:.2f}"
+            decision = Decision.ALLOW if alignment >= self.threshold else Decision.FLAG
+            # Judge only arbitrates borderline PURPOSE alignment (cost-control).
+            if self.judge is not None and abs(alignment - self.threshold) <= self.judge_band:
+                on_mission = bool(self.judge(content, self._purpose))
+                details["judge"] = on_mission
+                decision = Decision.ALLOW if on_mission else Decision.FLAG
+            reason = (
+                f"alignment {alignment:.2f} meets threshold {self.threshold:.2f}"
+                if decision == Decision.ALLOW
+                else f"alignment {alignment:.2f} below threshold {self.threshold:.2f}"
+            )
+
+        # The mode-aware RECOMMENDATION (advisory; the caller enforces). decision
+        # stays detection (ALLOW/FLAG) in every mode — even block — so the guard
+        # never itself escalates to acting on the caller's data (guardrail #1).
+        recommended = (
+            RecommendedAction.ALLOW
+            if decision == Decision.ALLOW
+            else _FLAG_ACTION_BY_MODE[self.mode]
+        )
+        details["mode"] = self.mode
+
+        # A SUGGESTED safe message for interventions only (redirect/block). It is
+        # text the caller MAY use; the guard never sends it. None for allow/monitor.
+        fallback = None
+        if recommended in _FALLBACK_ACTIONS:
+            fallback = self._render_fallback(blocked_hit, blocked_topic, reason)
 
         if record:
-            reading = meter.update(score)
+            # Drift tracks PURPOSE ALIGNMENT only; a blocked hit never feeds it.
+            reading = meter.update(alignment)
             details["drift"] = {
                 "current": reading.current,
                 "baseline": reading.baseline,
@@ -144,7 +281,29 @@ class PurposeGuard:
                 "drifting": reading.drifting,
             }
 
-        return Verdict(score=score, decision=decision, reason=reason, details=details)
+        return Verdict(
+            score=alignment,
+            decision=decision,
+            reason=reason,
+            details=details,
+            recommended_action=recommended,
+            fallback=fallback,
+        )
+
+    def _render_fallback(self, blocked_hit, blocked_topic, reason):
+        """Render the suggested safe message. Blocked hits name the topic; a
+        low-alignment flag uses the generic (purpose-only) template. Never raises:
+        a bad custom template degrades to a minimal safe message (guardrail #4)."""
+        ctx = {
+            "purpose": self._purpose,
+            "blocked_topic": blocked_topic or "",
+            "reason": reason,
+        }
+        template = self.fallback_template if blocked_hit else self.fallback_template_generic
+        try:
+            return template.format(**ctx)
+        except Exception:
+            return DEFAULT_FALLBACK_GENERIC.format(purpose=self._purpose)
 
     def check(self, write: "Write | str", *, record: bool = True) -> Verdict:
         """Score one memory WRITE against the purpose and return a Verdict.

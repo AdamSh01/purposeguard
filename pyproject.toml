@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "purposeguard"
-version = "0.1.3"
+version = "0.2.0"
 description = "A framework-agnostic drift guard for AI agent memory: detect when an agent forgets its purpose."
 readme = "README.md"
 requires-python = ">=3.9"

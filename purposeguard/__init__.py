@@ -20,15 +20,16 @@ from .drift import DriftMeter, DriftReading
 from .guard import PurposeGuard
 from .presets import BALANCED, BROAD, NARROW, Preset, get_preset
 from .scoring import EmbeddingScorer, LexicalScorer, Scorer, default_scorer
-from .types import Decision, Verdict, Write
+from .types import Decision, RecommendedAction, Verdict, Write
 
-__version__ = "0.1.3"
+__version__ = "0.2.0"
 
 __all__ = [
     "PurposeGuard",
     "Write",
     "Verdict",
     "Decision",
+    "RecommendedAction",
     "DriftMeter",
     "DriftReading",
     "Scorer",
