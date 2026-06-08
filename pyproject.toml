@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "purposeguard"
+version = "0.1.0.dev0"
+description = "A framework-agnostic drift guard for AI agent memory: detect when an agent forgets its purpose."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "PurposeGuard contributors" }]
+keywords = ["ai", "agents", "memory", "drift", "llm", "guardrails", "owasp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries",
+]
+# Base install is intentionally dependency-light: it runs out of the box with
+# the lexical fallback scorer and the standard library. No heavy ML deps forced
+# on adopters who just want to try it.
+dependencies = []
+
+[project.optional-dependencies]
+# Opt-in to local-embedding scoring for much better accuracy. This is the
+# recommended default for real deployments.
+embeddings = ["sentence-transformers>=2.2", "numpy>=1.21"]
+# Dev/test tooling.
+dev = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/AdamSh01/purposeguard"
+Issues = "https://github.com/AdamSh01/purposeguard/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["purposeguard*"]
