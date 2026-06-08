@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from .langchain import GuardedChatMessageHistory, guard_chat_history
 from .mem0 import GuardedMemory, guard_mem0, guarded_memory
+from .owasp_amg import CombinedVerdict, ComposedGuard, composed_guard, guard_with_amg
 from .raw import GuardedStore, Store, guard_store
 
 __all__ = [
@@ -27,4 +28,8 @@ __all__ = [
     "GuardedMemory",
     "guard_chat_history",
     "GuardedChatMessageHistory",
+    "guard_with_amg",
+    "composed_guard",
+    "ComposedGuard",
+    "CombinedVerdict",
 ]

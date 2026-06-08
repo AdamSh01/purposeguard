@@ -31,7 +31,10 @@ jobs:
         with:
           path: ~/.cache/huggingface
           key: hf-all-MiniLM-L6-v2
-      - run: pip install -e ".[dev,embeddings]"
+      # Install the optional adapter dep too, so the real-AMG integration test
+      # (importorskip) actually RUNS here instead of silently skipping -- the
+      # genuine PolicyViolation/block path must be exercised in CI, not just locally.
+      - run: pip install -e ".[dev,embeddings]" agent-memory-guard
       # Fail loudly if embeddings don't actually load — otherwise this job would
       # silently fall back to lexical and pass, defeating its purpose.
       - run: python -c "from purposeguard import PurposeGuard; PurposeGuard(purpose='billing payment refund', require_embeddings=True); print('embeddings OK')"
