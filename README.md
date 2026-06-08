@@ -16,10 +16,19 @@ single watchable number, before your users notice the agent has lost the plot.
   to check. Runs offline with zero model downloads (a local-embedding upgrade is
   one extra install away).
 
+First, `pip install "purposeguard[embeddings]"` (the lexical-only base install is a
+rough fallback — see [Install](#install)).
+
 ```python
 from purposeguard import PurposeGuard
 
-guard = PurposeGuard(purpose="A customer-support agent for billing questions")
+# Uses local embeddings (from the [embeddings] extra). In production, pass
+# require_embeddings=True to fail loudly instead of silently dropping to the
+# rough lexical floor if the model isn't available:
+guard = PurposeGuard(
+    purpose="A customer-support agent for billing questions",
+    require_embeddings=True,
+)
 
 verdict = guard.check("How do I bake sourdough bread?")
 print(verdict)            # Verdict(flag, score=0.08, reason='alignment 0.08 below threshold 0.15')
@@ -29,14 +38,20 @@ print(guard.drift())      # DriftReading(current=..., baseline=..., drift=..., n
 ## Install
 
 ```bash
-pip install purposeguard                 # base: runs anywhere, lexical fallback scorer
-pip install "purposeguard[embeddings]"   # recommended: local-embedding scoring (all-MiniLM-L6-v2)
+pip install "purposeguard[embeddings]"   # recommended for real use: local-embedding scoring (all-MiniLM-L6-v2)
+pip install purposeguard                  # minimal: zero deps, but only the rough lexical floor
 ```
 
-The base install has **zero required dependencies** and works behind a firewall.
-The `embeddings` extra adds local sentence-embeddings for much better semantic
-accuracy (no API key, runs on CPU). If the model can't be loaded, PurposeGuard
-warns once and falls back to the lexical scorer instead of crashing.
+**Install the `[embeddings]` extra for any real use.** It adds local
+sentence-embeddings (no API key, runs on CPU) and is the intended experience.
+
+The base install has **zero required dependencies** and works behind a firewall,
+but its only scorer is the **lexical floor** — a crash-proof *fallback*, not the
+real thing. It keys on word overlap, so it misjudges a lot of natural prose
+(benchmark false-positive rate 0.70–0.90; see [`benchmark/RESULTS.md`](benchmark/RESULTS.md)).
+Treat lexical as "works anywhere so the library never hard-fails," not as the
+detector you ship on. If the embedding model can't be loaded, PurposeGuard warns
+once and falls back to lexical instead of crashing.
 
 ## What it does
 
@@ -63,6 +78,54 @@ wanders. The meter stays flat, then climbs:
  9  FLAG    0.00   0.17  Discussed the user's favorite football team  <-- DRIFTING
 10  FLAG    0.08   0.16  Gave tips on training a new puppy            <-- DRIFTING
 ```
+
+## Two things to watch: what the agent stores *and* what it says
+
+An agent can drift in its **answers** even while its **memory writes** still look
+on-mission. So PurposeGuard scores both, with the same scorer and threshold:
+
+```python
+guard = PurposeGuard(purpose="A customer-support agent for billing questions")
+
+# What the agent STORES -> feeds guard.drift()
+guard.check("User asked about a refund on their invoice")
+
+# What the agent SAYS -> feeds guard.response_drift()
+guard.check_response(
+    user_input="How do I get a refund?",
+    response="Sure! Here's my favorite sourdough recipe...",   # off-mission answer
+)
+
+print(guard.drift())            # drift in stored memories
+print(guard.response_drift())   # drift in live answers
+```
+
+The two feed **separate** drift meters on purpose, so a healthy memory stream
+can't mask drifting answers (or vice versa) — and you can attribute drift to
+*memory* vs *live answers*. `user_input` is recorded as context but doesn't change
+the score: a billing agent that answers a weather question has drifted regardless
+of what it was asked. Like everything in v0.1, `check_response` only ever flags —
+it never blocks.
+
+## Adapters & examples
+
+Drop PurposeGuard into the frameworks you already use. The core stays
+framework-free; each adapter imports its framework lazily, tags off-mission
+writes' metadata, and never drops them (detection-first).
+
+| Framework | Wrap with | Import from `purposeguard.adapters` |
+| --- | --- | --- |
+| Any store with `add`/`search` | `guard_store(store, guard)` | `guard_store` |
+| Mem0 | `guard_mem0(client, guard)` or `guarded_memory(guard)` | `guard_mem0`, `guarded_memory` |
+| LangChain | `guard_chat_history(history, guard)` | `guard_chat_history`, `GuardedChatMessageHistory` |
+
+Runnable examples (no real framework or API key needed — they use local
+embeddings when available and print a visible notice if they fall back to the
+lexical floor):
+
+- [`examples/raw_store_example.py`](examples/raw_store_example.py)
+- [`examples/mem0_example.py`](examples/mem0_example.py)
+- [`examples/langchain_example.py`](examples/langchain_example.py)
 
 ## Honest limitations
 

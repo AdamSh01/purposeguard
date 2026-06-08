@@ -63,6 +63,16 @@ the reference changes. That's what makes "both" reachable without a rewrite.
    never required to use the guard. (This is the research-paper artifact, kept
    off the adoptable path on purpose.)
 
+## Near-term task (post-v0.1.1)
+
+- **Evaluate a torch-free embedding backend** (model2vec / static embeddings, or
+  an ONNX MiniLM) to make good semantic scoring a *light default* without the
+  torch dependency. This is the root-cause fix for the lexical-floor first
+  impression (benchmark FPR 0.70-0.90; the examples need a visible fallback
+  notice). If it lands, embeddings could become the default without the zero-dep
+  tax. Revisit guardrail #2 (zero required deps) ONLY if a light backend proves
+  infeasible -- do not change guardrail #2 until then.
+
 ## Guardrails (do not violate)
 
 - **Detection-first stays the default.** Enforcement (BLOCK) is always opt-in.

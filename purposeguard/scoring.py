@@ -150,18 +150,106 @@ class EmbeddingScorer:
         return _rescale_cosine(cos, self.cos_floor, self.cos_ceil)
 
 
+# Module-level so the "you're on the floor" notice fires at most once per process
+# (guardrail #4's warn-once pattern, applied to the function instead of an object).
+_warned_lexical_fallback = False
+
+
 def default_scorer(prefer_embeddings: bool = True) -> Scorer:
     """Pick the best available scorer.
 
     Tries the embedding scorer; if sentence-transformers isn't installed, falls
     back to lexical so the library always works. This is the single place that
     decides "fancy vs. floor", so the rest of the code never branches on it.
+
+    When it falls back to lexical *because embeddings were unavailable* (not
+    because the caller opted out), it warns ONCE — the silent floor is a
+    misleading first impression. A caller who deliberately wants the floor passes
+    ``LexicalScorer()`` explicitly (or ``prefer_embeddings=False``), which never
+    reaches this warning.
     """
+    global _warned_lexical_fallback
     if prefer_embeddings:
         try:
             import sentence_transformers  # noqa: F401
 
             return EmbeddingScorer()
         except Exception:
-            pass
+            if not _warned_lexical_fallback:
+                _warned_lexical_fallback = True
+                import warnings
+
+                warnings.warn(
+                    "PurposeGuard is using the lexical fallback scorer because the "
+                    "'embeddings' extra is not installed; verdicts will be rough. "
+                    "Install purposeguard[embeddings] for realistic results "
+                    "(or pass scorer=LexicalScorer() to choose the floor and "
+                    "silence this).",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
     return LexicalScorer()
+
+
+def require_embedding_scorer(model_name: str = "all-MiniLM-L6-v2") -> "EmbeddingScorer":
+    """Return a verified-working EmbeddingScorer, or raise — never the floor.
+
+    For callers who must NOT silently run on the lexical floor (see PurposeGuard's
+    ``require_embeddings=True``). Fails loudly if the 'embeddings' extra is missing
+    or the model can't actually be loaded, instead of degrading.
+    """
+    import warnings
+
+    try:
+        import sentence_transformers  # noqa: F401
+    except Exception as exc:
+        raise RuntimeError(
+            "require_embeddings=True but the 'embeddings' extra is not installed. "
+            'Install it with:  pip install "purposeguard[embeddings]"'
+        ) from exc
+
+    scorer = EmbeddingScorer(model_name)
+    with warnings.catch_warnings():  # the probe would warn-on-fallback; we raise instead
+        warnings.simplefilter("ignore")
+        scorer.score("probe", "probe")  # force the model to load
+    if scorer._fallback is not None:
+        raise RuntimeError(
+            f"require_embeddings=True but the embedding model '{model_name}' could "
+            "not be loaded (offline or unavailable). Make the model available, or "
+            "set require_embeddings=False to allow the lexical fallback."
+        )
+    return scorer
+
+
+def resolve_scorer(scorer: Optional[Scorer] = None, *, require_embeddings: bool = False) -> Scorer:
+    """Decide which scorer a guard should use.
+
+    Default: the caller's scorer, else `default_scorer()` (which may warn-once if
+    it falls back to lexical). With ``require_embeddings=True`` the lexical floor
+    is never used silently — a working embedding scorer is guaranteed or a clear
+    error is raised. Opt-in only; the default path is unchanged.
+    """
+    if not require_embeddings:
+        return scorer or default_scorer()
+
+    if scorer is None:
+        return require_embedding_scorer()
+    if isinstance(scorer, LexicalScorer):
+        raise ValueError(
+            "require_embeddings=True but a LexicalScorer was passed explicitly. "
+            "Omit scorer to auto-load embeddings, pass a working EmbeddingScorer, "
+            "or set require_embeddings=False."
+        )
+    if isinstance(scorer, EmbeddingScorer):
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            scorer.score("probe", "probe")
+        if scorer._fallback is not None:
+            raise RuntimeError(
+                "require_embeddings=True but the provided EmbeddingScorer fell back "
+                "to lexical (its model could not be loaded)."
+            )
+        return scorer
+    return scorer  # a custom scorer: not the lexical floor, so trust the caller
