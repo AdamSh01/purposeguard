@@ -1,6 +1,7 @@
 name: CI
 on: [push, pull_request]
 jobs:
+  # Fast, dependency-light path: tests pass with ZERO ML deps (lexical fallback).
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -11,9 +12,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      # Install the dependency-light base + dev tools only. The whole point is
-      # that tests pass with ZERO ML dependencies (lexical fallback scorer).
       - run: pip install -e ".[dev]"
       - run: python -m pytest tests/ -v
       # Smoke-test the demo runs offline.
       - run: python examples/drift_demo.py
+
+  # Slower path: actually exercise the embedding scorer we recommend, so the
+  # default experience is covered in CI (not just the lexical floor). Separate
+  # job, single Python, model download cached.
+  test-embeddings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-all-MiniLM-L6-v2
+      - run: pip install -e ".[dev,embeddings]"
+      # Fail loudly if embeddings don't actually load — otherwise this job would
+      # silently fall back to lexical and pass, defeating its purpose.
+      - run: python -c "from purposeguard import PurposeGuard; PurposeGuard(purpose='billing payment refund', require_embeddings=True); print('embeddings OK')"
+      - run: python -m pytest tests/ -v
+      # End-to-end embedding path: benchmark + adversarial suite on real vectors.
+      - run: python benchmark/run.py
+      - run: python benchmark/adversarial.py

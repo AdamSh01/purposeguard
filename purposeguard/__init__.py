@@ -22,7 +22,7 @@ from .presets import BALANCED, BROAD, NARROW, Preset, get_preset
 from .scoring import EmbeddingScorer, LexicalScorer, Scorer, default_scorer
 from .types import Decision, Verdict, Write
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.2"
 
 __all__ = [
     "PurposeGuard",

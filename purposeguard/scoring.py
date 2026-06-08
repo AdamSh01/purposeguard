@@ -60,16 +60,21 @@ class LexicalScorer:
         return max(0.0, min(1.0, dot / (na * nb)))
 
 
-def _rescale_cosine(cos: float, floor: float = 0.0, ceil: float = 0.5) -> float:
+def _rescale_cosine(cos: float, floor: float = 0.0, ceil: float = 0.61) -> float:
     """Clamp-and-stretch a raw cosine into [0,1] using a realistic band.
 
     Sentence-embedding cosines for natural text occupy a narrow band: with
-    all-MiniLM, unrelated content sits near 0.0 and even strongly on-topic content
-    only reaches ~0.5. Mapping that band [floor, ceil] onto [0,1] keeps scores in
+    all-MiniLM, unrelated content sits near 0.0 and strongly on-topic content
+    reaches only ~0.6. Mapping that band [floor, ceil] onto [0,1] keeps scores in
     the unit interval while using their real dynamic range, so a small cosine gap
     becomes a usable score gap. (The earlier (cos+1)/2 remap instead squashed
     everything into ~[0.45, 0.75], shrinking both the per-write margin and the
     drift delta — see benchmark/RESULTS.md.) Values outside the band clamp.
+
+    The default band [0.0, 0.61] is calibrated on the benchmark's TRAIN traces
+    only (ceil = 95th percentile of narrow on-mission cosines), NOT on the
+    reported test set — see benchmark/calibrate.py. It is domain-sensitive; tune
+    via EmbeddingScorer(cos_floor=..., cos_ceil=...) for your corpus.
     """
     if ceil <= floor:
         return 0.0
@@ -83,10 +88,10 @@ class EmbeddingScorer:
 
     Scoring is cosine similarity followed by a clamp-and-stretch into [0,1] (see
     :func:`_rescale_cosine`). The default band [``cos_floor``, ``cos_ceil``] =
-    [0.0, 0.5] was chosen from the benchmark's measured cosine distributions:
-    off-mission writes cluster at ~0.0 and strongly on-mission writes top out
-    near ~0.5 for this model. The model is loaded lazily so importing the library
-    is cheap and a caller who never scores never pays the load cost.
+    [0.0, 0.61] is calibrated on the benchmark's TRAIN traces only (off-mission
+    writes cluster at ~0.0; ceil is the 95th percentile of narrow on-mission
+    cosines). The model is loaded lazily so importing the library is cheap and a
+    caller who never scores never pays the load cost.
     """
 
     def __init__(
@@ -94,7 +99,7 @@ class EmbeddingScorer:
         model_name: str = "all-MiniLM-L6-v2",
         *,
         cos_floor: float = 0.0,
-        cos_ceil: float = 0.5,
+        cos_ceil: float = 0.61,
     ) -> None:
         self.model_name = model_name
         self.cos_floor = cos_floor

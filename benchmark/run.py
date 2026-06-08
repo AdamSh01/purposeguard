@@ -116,6 +116,8 @@ def _recommended(trace):
 def main() -> None:
     scorers = dict(get_scorers())
     print("PurposeGuard v0.1 benchmark: synthetic drift traces")
+    print("reporting on the HELD-OUT TEST set; band/presets calibrated on TRAIN "
+          "only (see calibrate.py)")
     print(f"scorers run: {', '.join(scorers)}")
     print(
         f"config: drift_alpha={DRIFT_ALPHA}, drift_baseline_window="

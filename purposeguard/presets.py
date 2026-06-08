@@ -10,13 +10,15 @@ while at a lenient one a narrow agent starts missing real drift. There is no
 single value that is perfect for both — these presets are the supported way to
 pick the right point on that curve for *your* agent.
 
-Values were chosen from `benchmark/_calibrate.py` sweeps over the three profiles
-(see `benchmark/RESULTS.md`):
+Values are calibrated on the benchmark's TRAIN traces only (router + wellness
+domains) via `benchmark/calibrate.py`, and reported on the held-out TEST traces
+in `benchmark/RESULTS.md` — they are NOT fit to the numbers we report:
 
-  * NARROW  (0.20) — narrow agents: FPR ~0.00, precision/recall ~1.00.
-  * BALANCED(0.15) — default: narrow still ~perfect; broad FPR moderate.
-  * BROAD   (0.10) — broad agents: broad FPR drops sharply (~0.30 -> ~0.07),
-                     at the cost of some recall on a *drifting* agent.
+  * NARROW  (0.25) — narrow agents: full recall on the training drifting agent
+                     with zero false positives (narrow on-mission scores high).
+  * BALANCED(0.15) — default: a focused agent with some range.
+  * BROAD   (0.10) — broad agents: keeps broad-agent false positives low (their
+                     on-mission writes score lower and more variably).
 
 These are tuned for the EmbeddingScorer's rescaled scores. The LexicalScorer is a
 floor and too noisy to preset meaningfully — install the `embeddings` extra for
@@ -44,7 +46,7 @@ class Preset:
 
 NARROW = Preset(
     "narrow",
-    0.20,
+    0.25,
     "Single-purpose agent: strict. Flags anything not clearly on its one topic.",
 )
 BALANCED = Preset(

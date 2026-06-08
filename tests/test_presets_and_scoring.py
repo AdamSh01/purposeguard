@@ -22,10 +22,10 @@ from purposeguard.scoring import _rescale_cosine
 # -- the score-compression fix -------------------------------------------------
 
 def test_rescale_maps_band_to_unit_interval():
-    # Default band [0.0, 0.5]: floor -> 0, ceil -> 1, midpoint -> 0.5.
+    # Default band [0.0, 0.61]: floor -> 0, ceil -> 1, midpoint -> 0.5.
     assert _rescale_cosine(0.0) == pytest.approx(0.0)
-    assert _rescale_cosine(0.5) == pytest.approx(1.0)
-    assert _rescale_cosine(0.25) == pytest.approx(0.5)
+    assert _rescale_cosine(0.61) == pytest.approx(1.0)
+    assert _rescale_cosine(0.305) == pytest.approx(0.5)
 
 
 def test_rescale_clamps_outside_band():
@@ -34,18 +34,18 @@ def test_rescale_clamps_outside_band():
 
 
 def test_rescale_is_monotonic():
-    assert _rescale_cosine(0.05) < _rescale_cosine(0.20) < _rescale_cosine(0.45)
+    assert _rescale_cosine(0.05) < _rescale_cosine(0.20) < _rescale_cosine(0.55)
 
 
 def test_rescale_restores_dynamic_range_vs_old_remap():
-    """The whole point of Task 3's first fix: stop squashing the real band.
+    """The whole point of the rescale: stop squashing the real cosine band.
 
-    Over the realistic cosine band [0, 0.5], the old (cos+1)/2 remap spanned only
-    [0.5, 0.75] (range 0.25); the rescale spans the full [0,1] (range 1.0).
+    Over the realistic band [0, 0.61], the old (cos+1)/2 remap spanned only
+    [0.5, ~0.805] (range ~0.305); the rescale spans the full [0,1] (range 1.0).
     """
     old = lambda c: (c + 1.0) / 2.0
-    new_spread = _rescale_cosine(0.5) - _rescale_cosine(0.0)
-    old_spread = old(0.5) - old(0.0)
+    new_spread = _rescale_cosine(0.61) - _rescale_cosine(0.0)
+    old_spread = old(0.61) - old(0.0)
     assert new_spread > old_spread
     assert new_spread == pytest.approx(1.0)
 
