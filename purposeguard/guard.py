@@ -4,7 +4,7 @@ Usage is meant to be one line to construct, one line to check:
 
     guard = PurposeGuard(purpose="A customer-support agent for billing questions")
     verdict = guard.check("User asked how to bake sourdough bread")
-    # -> Verdict(flag, score=0.10, reason='alignment 0.10 below threshold 0.55')
+    # -> Verdict(flag, score=0.10, reason='alignment 0.10 below threshold 0.15')
 
 Everything is framework-agnostic: `check()` takes a str or a Write, so Mem0,
 LangChain, a raw store, or a plain script can all use it. The guard composes
@@ -64,6 +64,21 @@ DEFAULT_PURPOSE_FLOOR = 0.28
 LLMJudge = Callable[[str, str], bool]
 
 
+def _validate_unit(name: str, value: float, *, allow_zero: bool = True) -> None:
+    """Validate a similarity-style parameter lies in [0,1] (or (0,1] if not allow_zero).
+
+    Thresholds and the EMA alpha are meaningless outside this band: a threshold >1
+    flags everything, <0 allows everything, and an alpha outside (0,1] drives the
+    drift EMA outside the [0,1] range every docstring promises. Mirrors the existing
+    purpose/mode validation so misconfiguration fails loud at construction instead of
+    silently producing nonsense verdicts.
+    """
+    lo_ok = value >= 0.0 if allow_zero else value > 0.0
+    if not (lo_ok and value <= 1.0):
+        rng = "[0.0, 1.0]" if allow_zero else "(0.0, 1.0]"
+        raise ValueError(f"{name} must be in {rng}, got {value!r}")
+
+
 class PurposeGuard:
     def __init__(
         self,
@@ -83,6 +98,7 @@ class PurposeGuard:
         judge_band: float = 0.10,
         drift_alpha: float = 0.2,
         drift_baseline_window: int = 10,
+        on_verdict: Optional[Callable[[Verdict], None]] = None,
     ) -> None:
         """
         purpose: the immutable mission statement. This is the reference every
@@ -101,10 +117,11 @@ class PurposeGuard:
             blocked topic reaches `blocked_threshold` is FLAGged REGARDLESS of
             purpose alignment (blocked OVERRIDES alignment). This partially closes
             keyword-camouflage: on-mission vocabulary cannot rescue content that is
-            clearly about a blocked topic. A blocked hit is an immediate hard flag
-            and does NOT feed the drift meter (drift tracks purpose alignment, not
-            forbidden-topic hits). Absent allowed/blocked lists == exact v0.1
-            behavior.
+            clearly about a blocked topic. A blocked hit is an immediate hard flag;
+            it adds no forbidden-topic-specific signal to the drift meter (drift
+            tracks purpose alignment only). The write's own alignment score is still
+            recorded in the meter even on a blocked hit. Absent allowed/blocked
+            lists == exact v0.1 behavior.
 
             KNOWN TRADEOFF (intentional, conservative): blocked-overrides-alignment
             means a *legitimately on-purpose* write that sits semantically near a
@@ -162,6 +179,18 @@ class PurposeGuard:
         self.blocked_threshold = (
             DEFAULT_BLOCKED_THRESHOLD if blocked_threshold is None else blocked_threshold
         )
+        # Range-validate every numeric knob (fail loud, like purpose/mode below).
+        _validate_unit("threshold", self.threshold)
+        _validate_unit("blocked_threshold", self.blocked_threshold, allow_zero=False)
+        _validate_unit("drift_alpha", drift_alpha, allow_zero=False)
+        if purpose_floor is not None:
+            _validate_unit("purpose_floor", purpose_floor)
+        if drift_baseline_window < 1:
+            raise ValueError(
+                f"drift_baseline_window must be >= 1, got {drift_baseline_window!r}"
+            )
+        if judge_band < 0:
+            raise ValueError(f"judge_band must be >= 0, got {judge_band!r}")
         if mode not in _VALID_MODES:
             raise ValueError(f"mode must be one of {_VALID_MODES!r}, got {mode!r}")
         self.mode = mode
@@ -170,6 +199,10 @@ class PurposeGuard:
         self.scorer = resolve_scorer(scorer, require_embeddings=require_embeddings)
         self.judge = judge
         self.judge_band = judge_band
+        # Optional observability hook fired with every Verdict (a structured event
+        # stream so adapters don't each reimplement logging). It must never break
+        # the guard: an exception in the hook is swallowed with a warning.
+        self.on_verdict = on_verdict
         # Two independent meters on the same machinery: one for what the agent
         # STORES (check), one for what it SAYS (check_response). They are kept
         # separate on purpose — see check_response's docstring for why.
@@ -216,17 +249,30 @@ class PurposeGuard:
         """Read-only forbidden topic anchors (fixed for the guard's lifetime)."""
         return tuple(self._blocked_topics)
 
-    def _best_anchor(self, content: str, anchors: list):
-        """Best ``(score, anchor)`` of ``content`` over a list of topic anchors.
+    def _score_many(self, content: str, references: list) -> list:
+        """Score ``content`` against many reference strings, embedding the content
+        ONCE when the scorer supports it (``score_many``), else one ``score()`` per
+        reference. This is the hot path: every check scores one content against the
+        purpose + every allowed + every blocked anchor, so embedding content once
+        instead of once-per-anchor is the real per-check saving. Anchors are just
+        extra reference strings — not a parallel scoring route."""
+        if not references:
+            return []
+        score_many = getattr(self.scorer, "score_many", None)
+        if score_many is not None:
+            return list(score_many(content, references))
+        return [self.scorer.score(content, r) for r in references]
 
-        Reuses the SAME scorer as the purpose — anchors are just extra reference
-        strings, not a parallel scoring route. Returns ``(0.0, None)`` if empty.
-        """
+    @staticmethod
+    def _best(scores: list, anchors: list):
+        """Best ``(score, anchor)`` over parallel score/anchor lists. Seeds the
+        anchor on the first element, so a non-empty list always names a topic — even
+        if every score is 0.0 — and blocked_hit can never be True with topic=None.
+        Returns ``(0.0, None)`` for an empty list."""
         best_score, best_anchor = 0.0, None
-        for anchor in anchors:
-            s = self.scorer.score(content, anchor)
-            if s > best_score:
-                best_score, best_anchor = s, anchor
+        for s, a in zip(scores, anchors):
+            if best_anchor is None or s > best_score:
+                best_score, best_anchor = s, a
         return best_score, best_anchor
 
     def _evaluate(
@@ -236,6 +282,7 @@ class PurposeGuard:
         meter: DriftMeter,
         record: bool,
         extra_details: Optional[dict] = None,
+        context: Optional[dict] = None,
     ) -> Verdict:
         """Shared score -> policy -> meter path for every kind of check.
 
@@ -251,12 +298,20 @@ class PurposeGuard:
         ALIGNMENT score feeds the drift meter — a blocked hit is a discrete hard
         flag, not gradual drift.
         """
-        purpose_score = self.scorer.score(content, self._purpose)
-        allowed_score, allowed_topic = self._best_anchor(content, self._allowed_topics)
+        # Embed `content` ONCE and score it against the purpose + all anchors in a
+        # single pass (see _score_many): index 0 is the purpose, then the allowed
+        # topics, then the blocked topics.
+        na = len(self._allowed_topics)
+        refs = [self._purpose, *self._allowed_topics, *self._blocked_topics]
+        scores = self._score_many(content, refs)
+        purpose_score = scores[0]
+        allowed_score, allowed_topic = self._best(scores[1 : 1 + na], self._allowed_topics)
         alignment = max(purpose_score, allowed_score)
 
-        blocked_score, blocked_topic = self._best_anchor(content, self._blocked_topics)
-        blocked_hit = bool(self._blocked_topics) and blocked_score >= self.blocked_threshold
+        blocked_score, blocked_topic = self._best(scores[1 + na :], self._blocked_topics)
+        # Require an actually-selected anchor: never report a hit with topic=None
+        # (defends against a degenerate blocked_threshold; see _best).
+        blocked_hit = blocked_topic is not None and blocked_score >= self.blocked_threshold
 
         details: dict = {"similarity": alignment, "threshold": self.threshold}
         if extra_details:
@@ -308,7 +363,10 @@ class PurposeGuard:
             fallback = self._render_fallback(blocked_hit, blocked_topic, reason)
 
         if record:
-            # Drift tracks PURPOSE ALIGNMENT only; a blocked hit never feeds it.
+            # Drift tracks PURPOSE ALIGNMENT only. The forbidden-topic signal is
+            # never mixed in — but the write's own alignment score IS still recorded
+            # even on a blocked hit (a camouflage write is genuinely purpose-aligned;
+            # the blocked anchor already fired the hard flag separately).
             reading = meter.update(alignment)
             details["drift"] = {
                 "current": reading.current,
@@ -318,14 +376,28 @@ class PurposeGuard:
                 "anchored_drifting": reading.anchored_drifting,
             }
 
-        return Verdict(
+        verdict = Verdict(
             score=alignment,
             decision=decision,
             reason=reason,
             details=details,
             recommended_action=recommended,
             fallback=fallback,
+            context=dict(context) if context else {},
         )
+        if self.on_verdict is not None:
+            try:
+                self.on_verdict(verdict)
+            except Exception:
+                import warnings
+
+                warnings.warn(
+                    "on_verdict hook raised an exception; ignoring it (the "
+                    "observability hook must not break the guard).",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        return verdict
 
     def _render_fallback(self, blocked_hit, blocked_topic, reason):
         """Render the suggested safe message. Blocked hits name the topic; a
@@ -342,20 +414,42 @@ class PurposeGuard:
         except Exception:
             return DEFAULT_FALLBACK_GENERIC.format(purpose=self._purpose)
 
-    def check(self, write: "Write | str", *, record: bool = True) -> Verdict:
+    def check(
+        self, write: "Write | str", *, record: bool = True, context: Optional[dict] = None
+    ) -> Verdict:
         """Score one memory WRITE against the purpose and return a Verdict.
 
         record=True updates the write drift meter (read via drift()). Set it
         False for a dry-run check that shouldn't influence the trend (e.g.
-        re-scoring old data).
+        re-scoring old data). ``context`` (e.g. {"session_id": ...}) is merged with
+        the Write's own context and carried onto the Verdict for observability.
         """
         w = Write.coerce(write)
+        ctx = {**w.context, **(context or {})}
         return self._evaluate(
-            w.content, meter=self.meter, record=record, extra_details={"kind": "write"}
+            w.content, meter=self.meter, record=record,
+            extra_details={"kind": "write"}, context=ctx,
         )
 
+    def check_many(
+        self, writes: "list[Write | str]", *, record: bool = True
+    ) -> "list[Verdict]":
+        """Score a batch of writes in order. Convenience over a loop; verdicts are
+        returned in input order and (when ``record``) feed the write drift meter
+        sequentially, exactly as repeated ``check()`` calls would."""
+        return [self.check(w, record=record) for w in writes]
+
+    async def acheck(
+        self, write: "Write | str", *, record: bool = True, context: Optional[dict] = None
+    ) -> Verdict:
+        """Async-compatible ``check`` for async agent loops. Scoring is CPU-bound and
+        synchronous under the hood; this is an API-compatibility surface (so async
+        callers don't block on a sync signature), not a concurrency speedup."""
+        return self.check(write, record=record, context=context)
+
     def check_response(
-        self, user_input: str, response: str, *, record: bool = True
+        self, user_input: str, response: str, *, record: bool = True,
+        context: Optional[dict] = None,
     ) -> Verdict:
         """Score the agent's own RESPONSE against the purpose and return a Verdict.
 
@@ -396,7 +490,16 @@ class PurposeGuard:
             meter=self._response_meter,
             record=record,
             extra_details={"kind": "response", "user_input": user_input},
+            context=context or {},
         )
+
+    async def acheck_response(
+        self, user_input: str, response: str, *, record: bool = True,
+        context: Optional[dict] = None,
+    ) -> Verdict:
+        """Async-compatible ``check_response`` (see :meth:`acheck` on why it's a thin
+        wrapper). Lets async response handlers ``await guard.acheck_response(...)``."""
+        return self.check_response(user_input, response, record=record, context=context)
 
     def drift(self) -> DriftReading:
         """Current WRITE drift health (from check()) without recording a sample."""
@@ -406,6 +509,46 @@ class PurposeGuard:
         """Current RESPONSE drift health (from check_response()), kept separate
         from write drift() so the two failure modes don't mask each other."""
         return self._response_meter.reading()
+
+    def health(self) -> dict:
+        """One composite, JSON-friendly snapshot of BOTH drift channels.
+
+        The two meters stay separate by design (write-drift vs response-drift can
+        fail independently), but callers who just want a single "is this agent
+        on-mission?" signal can read this. ``status`` is ``"drifting"`` if either
+        channel is drifting (relative trend) or off-purpose (anchored floor)."""
+        w, r = self.drift(), self.response_drift()
+        unhealthy = (
+            w.drifting or r.drifting or w.anchored_drifting or r.anchored_drifting
+        )
+        return {
+            "status": "drifting" if unhealthy else "ok",
+            "write_drift": w.to_dict(),
+            "response_drift": r.to_dict(),
+        }
+
+    def state(self) -> dict:
+        """Serialize the live drift state (both meters) so it survives a process
+        restart. Drift is a long-horizon signal: a guard rebuilt fresh each request
+        loses its baseline/EMA and starts the trend over. Persist this and rehydrate
+        with :meth:`restore`. The purpose is recorded so restore can verify it."""
+        return {
+            "version": 1,
+            "purpose": self._purpose,
+            "write_meter": self.meter.state(),
+            "response_meter": self._response_meter.state(),
+        }
+
+    def restore(self, state: dict) -> None:
+        """Restore drift state produced by :meth:`state`. Refuses a state saved under
+        a different purpose — the trend is only meaningful against the same immutable
+        reference it was measured against."""
+        if state.get("purpose") != self._purpose:
+            raise ValueError(
+                "cannot restore drift state saved under a different purpose"
+            )
+        self.meter = DriftMeter.from_state(state["write_meter"])
+        self._response_meter = DriftMeter.from_state(state["response_meter"])
 
     def reanchor(self, context: str, *, max_chars: int = 4000) -> str:
         """Re-inject the purpose at the front AND back of a context string.

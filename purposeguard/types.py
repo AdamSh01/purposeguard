@@ -59,6 +59,9 @@ class Write:
     content: str
     key: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Optional observability context (e.g. session_id / user_id / run_id). Carried
+    # through onto the Verdict so emitted events can be attributed at scale.
+    context: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def coerce(cls, write: "Write | str") -> "Write":
@@ -93,11 +96,29 @@ class Verdict:
     details: dict[str, Any] = field(default_factory=dict)
     recommended_action: RecommendedAction = RecommendedAction.ALLOW
     fallback: Optional[str] = None
+    # Observability context carried from the Write / check() call (session/user/run
+    # ids, etc.). Free-form; never affects the decision.
+    context: dict[str, Any] = field(default_factory=dict)
 
     @property
     def aligned(self) -> bool:
         """Convenience: did this write pass as on-purpose?"""
         return self.decision == Decision.ALLOW
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-friendly view for logging/observability. Enums become their string
+        values; ``details`` already holds only primitives, so the result is safe to
+        pass straight to ``json.dumps``."""
+        return {
+            "score": self.score,
+            "decision": self.decision.value,
+            "recommended_action": self.recommended_action.value,
+            "reason": self.reason,
+            "fallback": self.fallback,
+            "aligned": self.aligned,
+            "details": self.details,
+            "context": self.context,
+        }
 
     def __str__(self) -> str:
         return (

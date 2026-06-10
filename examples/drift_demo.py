@@ -12,7 +12,7 @@ Uses the lexical scorer so it runs with zero downloads anywhere. In a real
 deployment you'd let the default embedding scorer load for much better accuracy.
 """
 
-from purposeguard import PurposeGuard, LexicalScorer
+from purposeguard import LexicalScorer, PurposeGuard
 
 PURPOSE = (
     "A customer-support agent that answers billing payment subscription "

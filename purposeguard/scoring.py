@@ -18,20 +18,79 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
+from collections import Counter, OrderedDict
 from typing import Optional, Protocol
 
 
 class Scorer(Protocol):
-    """Anything that can rate content against a reference string in [0,1]."""
+    """Anything that can rate content against a reference string in [0,1].
+
+    ``score`` is the only required method. A scorer MAY also implement an
+    embed-once fast path used on the hot path (one content vs many anchors):
+
+      * ``embed(text) -> vec``        — turn text into the scorer's vector
+      * ``similarity(a, b) -> float`` — [0,1] similarity of two such vectors
+      * ``score_many(content, refs)`` — score one content against many refs,
+        embedding the content ONCE
+
+    The guard uses ``score_many`` when present and otherwise falls back to one
+    ``score()`` call per reference, so implementing them is purely an optimization.
+    """
 
     def score(self, content: str, reference: str) -> float: ...
 
 
 _TOKEN = re.compile(r"[a-z0-9]+")
 
+# A curated fold of the most common Cyrillic/Greek single-character homoglyphs of
+# ASCII letters. NFKC does NOT fold these (Cyrillic/Greek look-alikes are not
+# compatibility-equivalent to Latin), so they are mapped explicitly to close the
+# cheapest blocked-anchor evasion -- verified: swapping three Latin letters for
+# Cyrillic look-alikes flipped a blocked FLAG to a clean ALLOW. This is a FLOOR,
+# not a complete Unicode-confusables defense (see THREAT_MODEL.md), and it WILL
+# alter genuinely Cyrillic/Greek-script text -- a deliberate tradeoff, since topic
+# anchors and purposes are expected to be Latin-script.
+_CONFUSABLES = {
+    # Cyrillic lowercase
+    "а": "a", "е": "e", "ё": "e", "о": "o", "р": "p", "с": "c", "у": "y",
+    "х": "x", "ѕ": "s", "і": "i", "ј": "j", "ԁ": "d", "һ": "h", "ԛ": "q",
+    "ԝ": "w", "к": "k",
+    # Cyrillic uppercase
+    "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O",
+    "Р": "P", "С": "C", "Т": "T", "У": "Y", "Х": "X", "І": "I", "Ј": "J", "Ѕ": "S",
+    # Greek
+    "ο": "o", "Ο": "O", "α": "a", "Α": "A", "ε": "e", "ρ": "p", "Ρ": "P",
+    "Β": "B", "Ε": "E", "Ζ": "Z", "Η": "H", "Ι": "I", "Κ": "K", "Μ": "M",
+    "Ν": "N", "Τ": "T", "Υ": "Y", "Χ": "X",
+}
+
+# Zero-width / joiner / BOM characters used to split tokens or dodge tokenizers.
+# (Most are category Cf and also caught by the category check below; listed
+# explicitly so the intent is reviewable and robust across Unicode versions.)
+_ZERO_WIDTH = {"​", "‌", "‍", "⁠", "﻿"}
+
+
+def _normalize(text: str) -> str:
+    """Canonicalize text before scoring: NFKC, drop zero-width/format chars, and
+    fold common Cyrillic/Greek homoglyphs to ASCII.
+
+    Closes the cheapest blocked-anchor evasions (homoglyph + zero-width). It is a
+    floor, not a full confusables defense, and intentionally alters non-Latin-script
+    text -- anchors are expected to be Latin. Shared by BOTH scorers so the lexical
+    floor and the embedding path harden identically. See THREAT_MODEL.md.
+    """
+    text = unicodedata.normalize("NFKC", text)
+    out = []
+    for ch in text:
+        if ch in _ZERO_WIDTH or unicodedata.category(ch) == "Cf":
+            continue
+        out.append(_CONFUSABLES.get(ch, ch))
+    return "".join(out)
+
 
 def _tokens(text: str) -> list[str]:
-    return _TOKEN.findall(text.lower())
+    return _TOKEN.findall(_normalize(text).lower())
 
 
 class LexicalScorer:
@@ -44,20 +103,29 @@ class LexicalScorer:
     keep the library usable in locked-down environments.
     """
 
-    def score(self, content: str, reference: str) -> float:
-        a, b = _tokens(content), _tokens(reference)
+    def embed(self, text: str) -> Counter:
+        """The lexical 'embedding': a bag-of-words token-count vector."""
+        return Counter(_tokens(text))
+
+    def similarity(self, a: Counter, b: Counter) -> float:
+        """Cosine over two token-count vectors, clamped to [0,1]."""
         if not a or not b:
             return 0.0
-        from collections import Counter
-
-        ca, cb = Counter(a), Counter(b)
-        shared = set(ca) & set(cb)
-        dot = sum(ca[t] * cb[t] for t in shared)
-        na = math.sqrt(sum(v * v for v in ca.values()))
-        nb = math.sqrt(sum(v * v for v in cb.values()))
+        shared = set(a) & set(b)
+        dot = sum(a[t] * b[t] for t in shared)
+        na = math.sqrt(sum(v * v for v in a.values()))
+        nb = math.sqrt(sum(v * v for v in b.values()))
         if na == 0 or nb == 0:
             return 0.0
         return max(0.0, min(1.0, dot / (na * nb)))
+
+    def score(self, content: str, reference: str) -> float:
+        return self.similarity(self.embed(content), self.embed(reference))
+
+    def score_many(self, content: str, references: list) -> list:
+        """Embed ``content`` ONCE, then score it against each reference."""
+        c = self.embed(content)
+        return [self.similarity(c, self.embed(r)) for r in references]
 
 
 def _rescale_cosine(cos: float, floor: float = 0.0, ceil: float = 0.61) -> float:
@@ -105,7 +173,11 @@ class EmbeddingScorer:
         self.cos_floor = cos_floor
         self.cos_ceil = cos_ceil
         self._model = None  # lazy
-        self._ref_cache: dict[str, "object"] = {}
+        # Reference embeddings are cached (the purpose + fixed anchors rarely
+        # change). Bounded LRU so a scorer reused across many distinct references
+        # can't grow it without limit.
+        self._ref_cache: "OrderedDict[str, object]" = OrderedDict()
+        self._ref_cache_max = 1024
         # If the model can't be loaded (offline, firewalled, missing weights),
         # we degrade to a lexical scorer instead of crashing. An adopter behind
         # a corporate proxy should get a working library, not a stack trace.
@@ -118,20 +190,25 @@ class EmbeddingScorer:
             self._model = SentenceTransformer(self.model_name)
         return self._model
 
-    def score(self, content: str, reference: str) -> float:
+    def embed(self, text: str):
+        """Embed one text into a normalized sentence vector (or, if the model can't
+        load, a lexical token-count vector via the sticky fallback).
+
+        Normalizes first (homoglyph/zero-width hardening, see _normalize). numpy is
+        part of the [embeddings] extra, so its import can fail for the same reasons
+        the model can — kept INSIDE the try so a missing optional dep degrades to
+        the lexical floor exactly like a missing model, never a crash (guardrail #4).
+        """
+        text = _normalize(text)
         if self._fallback is not None:
-            return self._fallback.score(content, reference)
-        # numpy is part of the [embeddings] extra, so importing it can fail for
-        # the same reasons the model can — keep it INSIDE the try so a missing
-        # optional dep degrades to the lexical floor exactly like a missing model,
-        # never a crash (guardrail #4; EmbeddingScorer is the cited example).
+            return self._fallback.embed(text)
         try:
-            import numpy as np
+            import numpy as np  # noqa: F401  (presence check; used in similarity)
 
             model = self._ensure_model()
         except Exception:
             # First failure (missing model OR a missing optional dep like numpy):
-            # warn once, then quietly use the lexical floor.
+            # warn once, then quietly use the lexical floor for the rest of the run.
             import warnings
 
             warnings.warn(
@@ -143,16 +220,41 @@ class EmbeddingScorer:
                 stacklevel=2,
             )
             self._fallback = LexicalScorer()
-            return self._fallback.score(content, reference)
-        # Cache the reference (purpose) embedding — it rarely changes, and this
-        # is the hot path: every write scores against the same purpose.
-        ref_vec = self._ref_cache.get(reference)
-        if ref_vec is None:
-            ref_vec = model.encode(reference, normalize_embeddings=True)
-            self._ref_cache[reference] = ref_vec
-        con_vec = model.encode(content, normalize_embeddings=True)
-        cos = float(np.dot(con_vec, ref_vec))  # already normalized -> cosine
+            return self._fallback.embed(text)
+        return model.encode(text, normalize_embeddings=True)
+
+    def similarity(self, a, b) -> float:
+        """[0,1] similarity of two vectors from :meth:`embed`. Rescaled cosine in
+        model mode; delegates to the lexical fallback if that is active."""
+        if self._fallback is not None:
+            return self._fallback.similarity(a, b)
+        import numpy as np
+
+        cos = float(np.dot(a, b))  # vectors are already normalized -> cosine
         return _rescale_cosine(cos, self.cos_floor, self.cos_ceil)
+
+    def _ref_embed(self, reference: str):
+        """Embed a reference (purpose/anchor) with a bounded LRU cache — these are
+        the rarely-changing strings each write is scored against."""
+        key = _normalize(reference)
+        vec = self._ref_cache.get(key)
+        if vec is None:
+            vec = self.embed(reference)
+            self._ref_cache[key] = vec
+            if len(self._ref_cache) > self._ref_cache_max:
+                self._ref_cache.popitem(last=False)  # evict oldest
+        else:
+            self._ref_cache.move_to_end(key)
+        return vec
+
+    def score(self, content: str, reference: str) -> float:
+        return self.score_many(content, [reference])[0]
+
+    def score_many(self, content: str, references: list) -> list:
+        """Embed ``content`` ONCE, then score it against each (cached) reference —
+        the real per-check saving versus re-embedding content per anchor."""
+        cvec = self.embed(content)
+        return [self.similarity(cvec, self._ref_embed(r)) for r in references]
 
 
 # Module-level so the "you're on the floor" notice fires at most once per process

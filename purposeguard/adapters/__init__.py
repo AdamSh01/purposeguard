@@ -15,6 +15,7 @@ pattern, added one at a time.
 from __future__ import annotations
 
 from .langchain import GuardedChatMessageHistory, guard_chat_history
+from .mcp import build_mcp_server, purposeguard_tools
 from .mem0 import GuardedMemory, guard_mem0, guarded_memory
 from .owasp_amg import CombinedVerdict, ComposedGuard, composed_guard, guard_with_amg
 from .raw import GuardedStore, Store, guard_store
@@ -32,4 +33,6 @@ __all__ = [
     "composed_guard",
     "ComposedGuard",
     "CombinedVerdict",
+    "build_mcp_server",
+    "purposeguard_tools",
 ]

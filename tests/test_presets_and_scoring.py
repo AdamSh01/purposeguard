@@ -18,7 +18,6 @@ from purposeguard import (
 )
 from purposeguard.scoring import _rescale_cosine
 
-
 # -- the score-compression fix -------------------------------------------------
 
 def test_rescale_maps_band_to_unit_interval():
@@ -43,7 +42,9 @@ def test_rescale_restores_dynamic_range_vs_old_remap():
     Over the realistic band [0, 0.61], the old (cos+1)/2 remap spanned only
     [0.5, ~0.805] (range ~0.305); the rescale spans the full [0,1] (range 1.0).
     """
-    old = lambda c: (c + 1.0) / 2.0
+    def old(c):
+        return (c + 1.0) / 2.0
+
     new_spread = _rescale_cosine(0.61) - _rescale_cosine(0.0)
     old_spread = old(0.61) - old(0.0)
     assert new_spread > old_spread

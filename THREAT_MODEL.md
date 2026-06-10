@@ -159,6 +159,31 @@ as "gradual drift is handled." It evades only when the drift stays within ~0.15 
 the baseline (i.e. only *mildly* off) — or when it corrupts the baseline itself,
 which is (c).
 
+### (e) Obfuscation / evasion of blocked anchors — **partially mitigated (homoglyph, zero-width); the rest open**
+Because the scorer ultimately keys on the *characters* of a write, an attacker can
+rewrite blocked-topic words to look the same to a human but score differently:
+Unicode homoglyphs (Latin → Cyrillic/Greek look-alikes), zero-width characters
+inserted mid-word, paraphrase that shares no tokens with the anchor, a different
+language, or splitting a payload across several individually-on-topic writes.
+*Measured before hardening:* a three-character Cyrillic swap inside an enumerated
+blocked topic flipped a blocked **FLAG → ALLOW** — defeating the exact enumerated
+case §3a markets as the working win.
+- **Now closed (a floor, not a wall):** a shared input-normalization pass runs
+  before *both* scorers (`purposeguard/scoring.py:_normalize`): NFKC, strip
+  zero-width / format (`Cf`) characters, and fold a curated set of common
+  Cyrillic/Greek homoglyphs to ASCII. This neutralizes the homoglyph and
+  zero-width variants (the obfuscated payload now scores like the plain one). It is
+  **not** a complete Unicode-confusables defense, and by design it **alters
+  genuinely non-Latin-script text** — anchors/purposes are assumed Latin-script.
+- **Still open (unmitigated, by construction):** paraphrase below the lexical
+  floor, language-switch (also a false-*positive* source on legitimate non-English
+  on-mission writes), and payload-splitting across writes. These need a stronger
+  scorer and/or rule/policy checks, not character normalization.
+
+These classes are exercised in `tests/test_evasion.py` (closed cases asserted to
+flag; open cases asserted to bypass, so the disclosure is regression-locked) and
+measured in `benchmark/adversarial.py` (`evasion_followup`).
+
 ## 4. Mapping to recognized frameworks (only where honest)
 
 - **OWASP ASI06 — Memory & Context Poisoning.** AMG is the reference implementation

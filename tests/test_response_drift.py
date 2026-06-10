@@ -6,7 +6,6 @@ from writes (attribution), and that user_input is recorded context, not a
 scoring input.
 """
 
-import pytest
 
 from purposeguard import Decision, LexicalScorer, PurposeGuard
 
