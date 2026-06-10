@@ -48,6 +48,15 @@ DEFAULT_FALLBACK_GENERIC = "I can only help with {purpose}."
 # legitimate in-domain traffic (the v0.2.0 footgun; see benchmark/RESULTS.md).
 DEFAULT_BLOCKED_THRESHOLD = 0.46
 
+# Suggested purpose_floor for the purpose-anchored drift signal, calibrated on the
+# TRAIN domains (benchmark/calibrate.py) for NARROW/focused agents (EMA ~0.7+).
+# It catches OFF-purpose baseline poisoning the relative trend misses. It is OPT-IN
+# (purpose_floor defaults to None) and NOT safe for broad agents: measured, this
+# floor false-fired on 27/30 legitimate broad on-mission writes -- a broad agent's
+# alignment overlaps the poison level, so NO floor separates them. It is also blind
+# by construction to ON-purpose poisoning. See THREAT_MODEL.md.
+DEFAULT_PURPOSE_FLOOR = 0.28
+
 # Optional LLM judge: a function (content, purpose) -> bool ("is this on-mission?").
 # The library never ships one — the user supplies it if they want a second
 # opinion on borderline scores. Keeping it injectable means no API dependency
@@ -67,6 +76,7 @@ class PurposeGuard:
         mode: str = "monitor",
         fallback_template: str = DEFAULT_FALLBACK_TEMPLATE,
         fallback_template_generic: str = DEFAULT_FALLBACK_GENERIC,
+        purpose_floor: Optional[float] = None,
         scorer: Optional[Scorer] = None,
         require_embeddings: bool = False,
         judge: Optional[LLMJudge] = None,
@@ -124,6 +134,14 @@ class PurposeGuard:
             alignment (no specific blocked topic). Fields: {purpose}, {reason}.
             Default: "I can only help with {purpose}." The fallback is only ever a
             SUGGESTION carried in the verdict; the guard never sends it.
+        purpose_floor: OPT-IN absolute floor for the purpose-ANCHORED drift signal
+            (`drift().anchored_drifting`). Fires when the EMA of alignment to the
+            immutable purpose drops below it — with NO baseline term, so a poisoned
+            baseline can't hide an off-purpose stream. Default None (OFF). For a
+            NARROW/focused agent, pass ~DEFAULT_PURPOSE_FLOOR (0.28) to catch
+            off-purpose baseline poisoning. It is BLIND to ON-purpose poisoning and
+            is NOT safe for broad agents (it false-fired on 27/30 legit broad writes
+            in testing) — that's why it's off by default. See THREAT_MODEL.md.
         scorer: defaults to local embeddings if available, else lexical (which
             warns once — the floor is a fallback, not the intended experience).
         require_embeddings: opt-in. When True, the guard refuses to run silently
@@ -155,9 +173,15 @@ class PurposeGuard:
         # Two independent meters on the same machinery: one for what the agent
         # STORES (check), one for what it SAYS (check_response). They are kept
         # separate on purpose — see check_response's docstring for why.
-        self.meter = DriftMeter(alpha=drift_alpha, baseline_window=drift_baseline_window)
+        self.meter = DriftMeter(
+            alpha=drift_alpha,
+            baseline_window=drift_baseline_window,
+            purpose_floor=purpose_floor,
+        )
         self._response_meter = DriftMeter(
-            alpha=drift_alpha, baseline_window=drift_baseline_window
+            alpha=drift_alpha,
+            baseline_window=drift_baseline_window,
+            purpose_floor=purpose_floor,
         )
 
     @classmethod
@@ -291,6 +315,7 @@ class PurposeGuard:
                 "baseline": reading.baseline,
                 "drift": reading.drift,
                 "drifting": reading.drifting,
+                "anchored_drifting": reading.anchored_drifting,
             }
 
         return Verdict(

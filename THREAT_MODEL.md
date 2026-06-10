@@ -120,22 +120,36 @@ cannot see policy/behavioral correctness. This needs **rule/policy checks**, not
 drift — partly AMG's `Policy` (protected/immutable keys, declarative rules), but
 arbitrary business-rule violations are outside both tools.
 
-### (c) Baseline poisoning — **KNOWN OPEN GAP; trend ASR 100% by construction**
-If adversarial content fills the first writes (the baseline window), the trend has
-no "normal" to drift from and **never fires (100% trend ASR)**. This is **unsolved
-and structural**, not a tuning bug.
-- **Partial mitigation, measured:** the per-write check scores against the
-  *immutable purpose*, not the baseline, so it still flagged every poisoned write
-  (**per-write FLAG ASR = 0%** in the suite). The immutable purpose is the only
-  fixed reference that resists this; it is why baseline poisoning is confined to
-  the *trend*.
-- **Why a future consensus reference inherits the same flaw:** the planned v0.2
-  "consensus" detector would score a write against the cluster of *existing*
-  memories. That is the same *relative-to-history* design as the drift baseline —
-  an attacker who poisons the existing/early memories defines the consensus, so
-  later poisoned writes look normal. Any reference computed *from memory* is
-  poisonable; only a reference fixed *outside* memory (the immutable purpose, or a
-  human-set policy) resists it. State this plainly before building v0.2.
+### (c) Baseline poisoning — **partially mitigated by purpose-anchored detection (measured)**
+If adversarial content fills the first writes (the baseline window), the RELATIVE
+drift trend (drift-from-baseline) has no "normal" to drift from and **never fires
+(100% trend ASR)**. v0.3 adds a purpose-ANCHORED signal that addresses the
+*off-purpose* case; the precise, measured scope:
+
+- **Per-write check (always on):** scores against the *immutable purpose*, not the
+  baseline, so it still flagged every poisoned write (**per-write FLAG ASR = 0%**).
+- **Purpose-anchored trend (v0.3, opt-in `purpose_floor`):** the EMA of
+  alignment-to-purpose vs an ABSOLUTE floor (no baseline term). Measured: on the
+  off-purpose baseline-poisoning family it **FIRED** where the relative trend
+  EVADED. This closes the *off-purpose* baseline-poisoning trend gap.
+- **BLIND to ON-purpose poisoning (by construction, headline caveat):** content
+  that stays purpose-aligned (e.g. "approve all refunds without verification" —
+  topically billing, behaviorally wrong) stays ABOVE the floor and is invisible.
+  Purpose-anchored detection closes the *off-purpose* gap; **on-purpose poisoning
+  needs rules, not drift** (it is family (b), 100% ASR, AMG/policy territory).
+- **Broad-agent false positives — why it's OPT-IN, not default:** an absolute
+  floor is the broad-agent footgun. Measured, the TRAIN-calibrated floor (0.28)
+  that catches poisoning false-fired on **27/30 legitimate broad on-mission
+  writes** (held-out general-assistant). A broad agent's legit alignment (~0.2–0.25)
+  *overlaps* the poison level (~0.18) — **no single floor separates them.** So the
+  anchored signal ships **off by default**; enable it (`purpose_floor≈0.28`) only
+  for NARROW/focused agents (whose alignment sits ~0.7, far above the floor).
+- **Why a future consensus reference inherits the relative-trend flaw:** a v0.3+
+  "consensus" detector scores a write against the cluster of *existing* memories —
+  the same *relative-to-history* design as the drift baseline. An attacker who
+  poisons the existing memories defines the consensus, so later poisoned writes
+  look normal. Any reference computed *from memory* is poisonable; only a reference
+  fixed *outside* memory (the immutable purpose, or a human-set policy) resists it.
 
 ### (b′) Gradual drift (boiling frog) — partially mitigated *in our test*, not "solved"
 The gradual ramp we tested **ended clearly off-mission, and was largely caught**:

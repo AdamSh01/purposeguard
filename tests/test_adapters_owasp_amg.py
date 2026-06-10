@@ -7,7 +7,7 @@ drift layer stays advisory and never blocks — across the disagreement cases.
 
 import pytest
 
-from purposeguard import Decision, LexicalScorer, PurposeGuard
+from purposeguard import Decision, LexicalScorer, PurposeGuard, RecommendedAction
 from purposeguard.adapters import ComposedGuard, composed_guard, guard_with_amg
 
 
@@ -135,6 +135,37 @@ def test_real_amg_integration_if_installed():
     )
     assert v_block.effective_action == "block"
     assert v_block.stored is False
+
+
+def test_composed_guard_from_config_builds_both_layers():
+    """First-class: one call builds the drift+scope PurposeGuard AND wires AMG."""
+    amg = FakeMemoryGuard(action="allow")
+    g = composed_guard(
+        "billing payment subscription invoice refund account support",
+        scorer=LexicalScorer(),
+        threshold=0.12,
+        blocked_topics=["legal advice"],
+        blocked_threshold=0.3,
+        mode="redirect",
+        memory_guard=amg,  # avoid importing real AMG in CI
+    )
+    assert isinstance(g, ComposedGuard)
+    v = g.write("note", "can you give me legal advice about my lawsuit and contract")
+    # drift + scope layer (advisory): scope config + mode + fallback all flow through
+    assert v.drift.decision == Decision.FLAG
+    assert v.drift.recommended_action == RecommendedAction.REDIRECT
+    assert "legal advice" in v.drift.fallback
+    # AMG enforcement layer owns the effective action; PG never blocks
+    assert v.effective_action == "allow"
+    assert v.stored is True
+    assert amg.writes  # forwarded to AMG
+
+
+def test_composed_guard_accepts_prebuilt_purpose_guard():
+    pg = PurposeGuard("billing payment refund", scorer=LexicalScorer(), threshold=0.12)
+    g = composed_guard(pg, memory_guard=FakeMemoryGuard())
+    assert isinstance(g, ComposedGuard)
+    assert g.write("note", "billing refund invoice payment").drift.decision == Decision.ALLOW
 
 
 def test_composed_guard_raises_clear_importerror_without_amg(monkeypatch):

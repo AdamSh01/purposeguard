@@ -25,20 +25,34 @@ class DriftReading:
     baseline: float      # early-life alignment, [0,1]
     drift: float         # baseline - current, clamped at 0; higher = worse
     samples: int         # how many writes have been scored
+    purpose_floor: float | None = None  # absolute floor for the anchored signal
 
     @property
     def drifting(self) -> bool:
-        """Heuristic: meaningful drop from baseline. Tunable by the caller."""
+        """Heuristic: meaningful drop from the agent's own (early) baseline. This
+        is RELATIVE — poisoning/gradually walking the baseline can hide it."""
         return self.drift >= 0.15
 
+    @property
+    def anchored_drifting(self) -> bool:
+        """Purpose-ANCHORED drift: the EMA of alignment to the IMMUTABLE purpose is
+        below an ABSOLUTE floor (no baseline term). Unlike `drifting`, the attacker
+        can't walk the reference (the purpose is fixed), so this catches
+        off-purpose baseline-poisoning that the relative signal misses. BUT it is
+        blind by construction to ON-purpose poisoning (content that stays
+        purpose-aligned stays above the floor), and an absolute floor risks
+        over-flagging legitimately broad agents whose alignment sits near it. No
+        floor configured -> always False."""
+        return self.purpose_floor is not None and self.current < self.purpose_floor
+
     def __str__(self) -> str:
-        # ASCII-only marker on purpose: __str__ is an emitted output path, and a
-        # non-ASCII glyph here crashes on a Windows cp1252 console (guardrail #4:
-        # never crash). test_driftreading_str_is_ascii_safe locks this in.
+        # ASCII-only markers on purpose: __str__ is an emitted output path, and a
+        # non-ASCII glyph here crashes on a Windows cp1252 console (guardrail #4).
         flag = " [DRIFTING]" if self.drifting else ""
+        anchored = " [OFF-PURPOSE]" if self.anchored_drifting else ""
         return (
             f"DriftReading(current={self.current:.2f}, baseline={self.baseline:.2f}, "
-            f"drift={self.drift:.2f}, n={self.samples}){flag}"
+            f"drift={self.drift:.2f}, n={self.samples}){flag}{anchored}"
         )
 
 
@@ -52,9 +66,18 @@ class DriftMeter:
     agent sets its own bar instead of being judged against an absolute.
     """
 
-    def __init__(self, alpha: float = 0.2, baseline_window: int = 10) -> None:
+    def __init__(
+        self,
+        alpha: float = 0.2,
+        baseline_window: int = 10,
+        purpose_floor: float | None = None,
+    ) -> None:
         self.alpha = alpha
         self.baseline_window = baseline_window
+        # Absolute floor for the purpose-anchored signal (None disables it). NOT a
+        # baseline-relative term — that's the whole point (a poisoned baseline
+        # can't hide an off-purpose stream from an absolute floor).
+        self.purpose_floor = purpose_floor
         self._ema: float | None = None
         self._baseline_sum = 0.0
         self._baseline_n = 0
@@ -83,12 +106,16 @@ class DriftMeter:
             baseline=baseline,
             drift=drift,
             samples=self._samples,
+            purpose_floor=self.purpose_floor,
         )
 
     def reading(self) -> DriftReading:
         """Current state without recording a new sample."""
         if self._ema is None:
-            return DriftReading(current=1.0, baseline=1.0, drift=0.0, samples=0)
+            return DriftReading(
+                current=1.0, baseline=1.0, drift=0.0, samples=0,
+                purpose_floor=self.purpose_floor,
+            )
         baseline = (
             self._baseline_sum / self._baseline_n if self._baseline_n else self._ema
         )
@@ -97,4 +124,5 @@ class DriftMeter:
             baseline=baseline,
             drift=max(0.0, baseline - self._ema),
             samples=self._samples,
+            purpose_floor=self.purpose_floor,
         )

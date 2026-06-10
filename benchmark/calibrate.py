@@ -19,9 +19,15 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 try:
-    from traces import ROUTER_ON_MISSION, TRAIN_TRACES, WELLNESS_ON_MISSION
+    from traces import (
+        PURPOSE_ROUTER, PURPOSE_WELLNESS, ROUTER_ON_MISSION, TRAIN_OFF_MISSION,
+        TRAIN_TRACES, WELLNESS_ON_MISSION,
+    )
 except ImportError:
-    from benchmark.traces import ROUTER_ON_MISSION, TRAIN_TRACES, WELLNESS_ON_MISSION
+    from benchmark.traces import (
+        PURPOSE_ROUTER, PURPOSE_WELLNESS, ROUTER_ON_MISSION, TRAIN_OFF_MISSION,
+        TRAIN_TRACES, WELLNESS_ON_MISSION,
+    )
 
 from purposeguard import EmbeddingScorer
 
@@ -132,6 +138,46 @@ def calibrate_blocked_threshold():
           f"(legit p95 {p95:.2f} + margin; vs ~0.15 alignment default that over-flags)")
 
 
+def calibrate_purpose_floor():
+    """Derive a purpose_floor for the purpose-anchored drift signal from TRAIN.
+
+    The signal fires when the EMA of purpose-alignment falls below an ABSOLUTE
+    floor. The floor must sit ABOVE the off-purpose (poison) EMA so it fires on
+    baseline poisoning, but BELOW the legit BROAD agent's EMA dips so it doesn't
+    over-flag a legitimately broad on-mission agent. We report both bounds; if
+    they don't separate, no single floor works (an honest finding)."""
+    from purposeguard.drift import DriftMeter
+
+    scorer = EmbeddingScorer()
+
+    def ema_trajectory(writes, purpose):
+        m = DriftMeter()  # alpha 0.2, baseline_window 10 (defaults)
+        return [m.update(scorer.score(w, purpose)).current for w in writes]
+
+    router = ema_trajectory(ROUTER_ON_MISSION, PURPOSE_ROUTER)        # narrow legit
+    wellness = ema_trajectory(WELLNESS_ON_MISSION, PURPOSE_WELLNESS)  # BROAD legit (FP risk)
+    poison_r = ema_trajectory(TRAIN_OFF_MISSION, PURPOSE_ROUTER)      # off-purpose stream
+    poison_w = ema_trajectory(TRAIN_OFF_MISSION, PURPOSE_WELLNESS)
+
+    import statistics as st
+    broad_min = min(wellness)         # deepest legit broad EMA dip -> floor must be BELOW this
+    narrow_min = min(router)
+    poison_settle = max(poison_r[-1], poison_w[-1])  # where poison EMA lands -> floor ABOVE this
+
+    print("\n=== purpose_floor calibration (TRAIN) -- EMA of purpose-alignment ===")
+    print(f"narrow legit (router):   min EMA {narrow_min:.3f}  final {router[-1]:.3f}")
+    print(f"BROAD  legit (wellness): min EMA {broad_min:.3f}  final {wellness[-1]:.3f}  <- FP risk")
+    print(f"poison stream EMA settles at: ~{poison_settle:.3f}")
+    if broad_min > poison_settle:
+        rec = round((broad_min + poison_settle) / 2, 2)
+        print(f"window EXISTS: floor in ({poison_settle:.2f}, {broad_min:.2f}); "
+              f"recommended purpose_floor ~ {rec} (midpoint)")
+    else:
+        print(f"NO floor separates poison ({poison_settle:.2f}) from broad-legit "
+              f"({broad_min:.2f}) — anchored detection and broad-tolerance conflict.")
+
+
 if __name__ == "__main__":
     main()
     calibrate_blocked_threshold()
+    calibrate_purpose_floor()

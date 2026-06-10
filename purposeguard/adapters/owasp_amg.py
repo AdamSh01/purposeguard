@@ -176,17 +176,55 @@ def guard_with_amg(purpose_guard: PurposeGuard, memory_guard: Any) -> ComposedGu
 
 
 def composed_guard(
-    purpose_guard: PurposeGuard, *, policy: Any = None, store: Any = None, **amg_kwargs: Any
+    purpose: "str | PurposeGuard",
+    *,
+    policy: Any = None,
+    store: Any = None,
+    memory_guard: Any = None,
+    **purpose_guard_kwargs: Any,
 ) -> ComposedGuard:
-    """Build an AMG ``MemoryGuard`` (lazy-importing AMG) and compose it.
+    """First-class drift + scope + AMG-poisoning guard from a SINGLE config.
 
-    Use when you don't already have a MemoryGuard. Raises ImportError with an
-    install hint if agent-memory-guard isn't installed. ``policy``/``store`` and
-    any extra kwargs are passed through to ``MemoryGuard``.
+    One call gives the whole composed surface instead of wiring the layers by hand:
+
+        from agent_memory_guard import Policy
+        from purposeguard.adapters import composed_guard
+
+        guard = composed_guard(
+            "A customer-support assistant for billing and payments",
+            allowed_topics=["invoices", "refunds"],
+            blocked_topics=["legal advice", "medical advice"],
+            mode="redirect",
+            policy=Policy.strict(),
+        )
+        v = guard.write("note", "for your lawsuit, here's the legal advice you need")
+        # v.drift.recommended_action -> redirect (advisory drift/scope signal)
+        # v.effective_action         -> AMG's enforcement (allow/redact/block/quarantine)
+
+    - ``purpose`` is a purpose string (a PurposeGuard is built from it plus any
+      drift/scope kwargs: ``allowed_topics``, ``blocked_topics``, ``mode``,
+      ``threshold``, ``scorer``, ``require_embeddings``, ...), OR an already-built
+      PurposeGuard (then the extra kwargs are ignored).
+    - The AMG ``MemoryGuard`` is built from ``policy``/``store`` (lazy-importing
+      AMG; clear ImportError if absent), unless you pass an existing
+      ``memory_guard`` (e.g. one with custom detectors/snapshots).
+
+    The verdict-combination policy is unchanged (guardrail #1): PurposeGuard is
+    advisory and never blocks; AMG owns enforcement (``CombinedVerdict``'s
+    ``effective_action`` is always AMG's). This **composes defense-in-depth layers
+    — it is not a security guarantee.** AMG catches known markers/policies and is
+    defeated by novel obfuscation/encoding/paraphrase; PurposeGuard catches
+    topical drift/scope. See THREAT_MODEL.md.
     """
-    amg = _require_amg()
-    memory_guard = amg.MemoryGuard(store, policy=policy, **amg_kwargs)
-    return guard_with_amg(purpose_guard, memory_guard)
+    pg = (
+        purpose
+        if isinstance(purpose, PurposeGuard)
+        else PurposeGuard(purpose, **purpose_guard_kwargs)
+    )
+    if memory_guard is None:
+        amg = _require_amg()
+        memory_guard = amg.MemoryGuard(store, policy=policy)
+    return guard_with_amg(pg, memory_guard)
 
 
 def _require_amg():

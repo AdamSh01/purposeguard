@@ -154,6 +154,52 @@ lexical floor):
 - [`examples/mem0_example.py`](examples/mem0_example.py)
 - [`examples/langchain_example.py`](examples/langchain_example.py)
 
+## Compose with OWASP Agent Memory Guard (defense-in-depth)
+
+PurposeGuard catches drift + scope. For marker/policy **poisoning enforcement**,
+compose it with [OWASP Agent Memory Guard](https://github.com/OWASP/www-project-agent-memory-guard)
+in one config — `composed_guard` builds the drift+scope guard AND wires AMG:
+
+```python
+from agent_memory_guard import Policy
+from purposeguard.adapters import composed_guard
+
+guard = composed_guard(
+    "A customer-support assistant for billing and payments",
+    blocked_topics=["legal advice", "medical advice"],
+    mode="redirect",
+    policy=Policy.strict(),        # AMG (lazy-imported, optional dependency)
+)
+v = guard.write("note", "for your lawsuit, here's the legal advice you need")
+v.drift.recommended_action   # PurposeGuard: drift/scope (advisory; never blocks)
+v.effective_action           # AMG: enforcement (allow/redact/block/quarantine)
+```
+
+PurposeGuard stays advisory; **AMG owns enforcement.** This **composes
+defense-in-depth layers — it is NOT "secure against poisoning."** AMG catches
+*known* markers/policies and is defeated by novel obfuscation/encoding/paraphrase;
+PurposeGuard catches topical drift/scope. See [`THREAT_MODEL.md`](THREAT_MODEL.md).
+
+### Catching off-purpose baseline-poisoning (opt-in, narrow agents only)
+
+The drift *trend* is drift-from-baseline, so an attacker who controls the early
+writes can poison the baseline and hide. The opt-in **`purpose_floor`** adds a
+**purpose-anchored** signal — the EMA of alignment to the *immutable* purpose vs an
+absolute floor (no baseline term), surfaced as `drift().anchored_drifting`:
+
+```python
+guard = PurposeGuard(purpose="...", purpose_floor=0.28)  # opt-in; OFF by default
+```
+
+Measured honestly (see [`benchmark/RESULTS.md`](benchmark/RESULTS.md)): it **fires
+on off-purpose baseline-poisoning that the relative trend misses**, but it is
+**blind by construction to on-purpose poisoning** (content that stays
+purpose-aligned), and an absolute floor **over-flags broad agents** (27/30 legit
+broad on-mission writes in testing — a broad agent's alignment overlaps the poison
+level, so no floor separates them). So it is **off by default and for
+NARROW/focused agents only.** It is a narrow, opt-in mitigation for one case — not
+a poisoning defense.
+
 ## Honest limitations
 
 PurposeGuard is a **drift + scope guardrail — "keep your agent in its lane" —
@@ -247,13 +293,15 @@ FLAG as a tag, not a verdict. See [`benchmark/RESULTS.md`](benchmark/RESULTS.md)
   modes (the guard recommends, the caller acts), and suggested fallback messages.
   Composition with [OWASP Agent Memory Guard](https://github.com/OWASP/www-project-agent-memory-guard)
   for marker/policy poisoning enforcement.
-- **v0.3 (planned, not yet built)** — memory-poisoning layers: an
-  existing-memory **consensus** reference to catch adversarial, semantically-clean
-  writes that markers miss, composed with OWASP AMG. (Note: a consensus reference
-  is itself poisonable if the attacker controls the existing memories — see
-  THREAT_MODEL.md.)
-- **Later (opt-in, experimental)** — cryptographic write provenance
-  (tamper-evident log + trusted timestamps) for forensic attribution.
+- **v0.3 (this release)** — poisoning layer: a first-class `composed_guard`
+  (drift + scope + OWASP AMG poisoning/enforcement in one config), and an opt-in
+  purpose-anchored drift signal (`purpose_floor`) that catches off-purpose
+  baseline-poisoning the relative trend misses — narrow-agents-only / off by
+  default (over-flags broad agents), and blind by construction to on-purpose
+  poisoning. Defense-in-depth layers, not a security guarantee.
+- **Later** — an existing-memory **consensus** reference (note: itself poisonable
+  if the attacker controls the existing memories — THREAT_MODEL.md §3c); and,
+  opt-in/experimental, cryptographic write provenance for forensic attribution.
 
 ## License
 

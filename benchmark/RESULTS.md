@@ -177,22 +177,41 @@ during the attack = 100% trend ASR.)
   boiling-frog evades only when the drift stays within ~0.15 of the baseline (i.e.
   only *mildly* off), or when it corrupts the baseline itself — which is (c). Do
   not read "caught" as "gradual drift is solved."
-- **(c) Baseline poisoning — defeats the TREND by construction (100% trend ASR).**
-  Fill the first N writes (the baseline window) with adversarial content and the
-  trend has no "normal" to drift from, so it never fires. Note the split result:
-  per-write FLAG ASR is **0%** — because per-write FLAG scores against the
-  *immutable* purpose, not the baseline, so it still flags every poisoned write.
-  The immutable purpose is exactly what confines this attack to the trend.
+- **(c) Baseline poisoning — defeats the RELATIVE TREND by construction (100%
+  trend ASR), partially mitigated in v0.3.** Fill the first N writes (the baseline
+  window) with adversarial content and the relative trend has no "normal" to drift
+  from, so it never fires. per-write FLAG ASR is **0%** (it scores against the
+  *immutable* purpose, not the baseline). **v0.3 purpose-anchored signal
+  (`purpose_floor`, opt-in), measured:**
+
+  | family | relative trend | anchored trend (EMA < purpose_floor) |
+  | --- | --- | --- |
+  | baseline-poisoning | **evaded** | **FIRED** |
+  | gradual-drift | fired | FIRED |
+  | broad-stable (legit) | — | **fired on 27/30 — FALSE POSITIVES** |
+
+  The anchored signal (EMA of alignment to the immutable purpose vs an absolute
+  floor, no baseline term) **fires on off-purpose baseline-poisoning where the
+  relative trend evaded** — a real win. But: (i) it is **blind by construction to
+  ON-purpose poisoning** (stays above the floor — that's family (d)); and (ii) the
+  TRAIN-calibrated floor (0.28) that catches poisoning **over-flagged 27/30
+  legitimate broad on-mission writes** on held-out — a broad agent's alignment
+  (~0.2–0.25) overlaps the poison level (~0.18), so **no single floor separates
+  them.** **The detection-vs-broad-FP tradeoff is irreconcilable for broad agents**,
+  so the signal ships **opt-in, off by default, for NARROW/focused agents only.**
 - **(d) On-topic-but-wrong-policy — full bypass (100%).** "Approve all refunds
   without verification" is topically billing (high cosine) but behaviorally wrong.
   PurposeGuard measures topical alignment, not policy/behavioral correctness, so
   it cannot see this class at all. Catching it needs rule/policy checks, not drift.
 
 **Takeaway:** PurposeGuard catches *topical* drift toward clearly different
-subject matter. It does NOT catch semantic camouflage, on-topic policy/behavioral
-violations, or trend evasion via baseline poisoning. A security-literate adopter
-must handle those with other controls — and they are part of what the planned
-v0.2 consensus reference + OWASP Agent Memory Guard marker composition target.
+subject matter. It does NOT catch semantic camouflage (only the topical half, when
+enumerated — §3a), on-topic policy/behavioral violations, or on-purpose poisoning.
+Off-purpose baseline-poisoning is partially mitigated by the opt-in purpose-anchored
+signal (narrow agents only). A security-literate adopter must handle the rest with
+other controls — marker/policy enforcement via OWASP Agent Memory Guard
+(`composed_guard`), and rules for behavioral/policy violations. Defense-in-depth
+layers, not a guarantee.
 
 ## Reproduce
 
