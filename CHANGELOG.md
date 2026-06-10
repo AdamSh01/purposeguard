@@ -7,7 +7,11 @@ so minor versions may still change behavior).
 
 ## [Unreleased]
 
-The "Trust & Correctness" + "Credibility & Integration" pass (toward v0.4.0).
+_Nothing yet._
+
+## [0.4.0] - 2026-06-10
+
+The "Trust & Correctness" + "Credibility & Integration" pass.
 
 ### Added
 - **Input normalization** before scoring (NFKC, zero-width/`Cf` stripping, and a

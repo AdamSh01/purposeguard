@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "purposeguard"
-version = "0.3.0"
+version = "0.4.0"
 description = "Drift + scope guardrail for AI agents: purpose/mission observability that keeps your agent in its lane."
 readme = "README.md"
 requires-python = ">=3.9"
