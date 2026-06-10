@@ -13,9 +13,25 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
-      - run: python -m pytest tests/ -v
+      - run: python -m coverage run -m pytest tests/ -v
+      - run: python -m coverage report
       # Smoke-test the demo runs offline.
       - run: python examples/drift_demo.py
+
+  # Lint + type check. Dependency-light (no model), so it's fast and gating.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[lint]"
+      - run: ruff check purposeguard tests benchmark examples
+      # mypy is lenient (see pyproject [tool.mypy]); informational until the
+      # baseline is exhaustively annotated, so it can't block unrelated PRs.
+      - run: mypy purposeguard
+        continue-on-error: true
 
   # Slower path: actually exercise the embedding scorer we recommend, so the
   # default experience is covered in CI (not just the lexical floor). Separate

@@ -1,6 +1,6 @@
 # PurposeGuard
 
-**A drift + scope guardrail — keep your AI agent in its lane.**
+**A drift + scope guardrail — purpose/mission observability that keeps your AI agent in its lane.**
 
 Customer-facing agents wander. Session history piles up and the agent slowly
 answers off-mission — a billing assistant that drifts into recipes, weather, or
@@ -20,6 +20,17 @@ or block off-scope output. The guard *recommends*; your code decides.
   plain script. `pip install`, one line to construct, one line to check.
 - **Honest about scope.** A drift + scope guardrail, **not a security tool** —
   see [Honest limitations](#honest-limitations).
+
+## Why agents drift — and why your memory layer won't catch it
+
+A role prompt set at session start gets buried as history grows: models attend best
+to the **start and end** of their context (the U-shaped curve), so the mission fades
+from the middle. Vector memory (mem0, Chroma, LangChain history) optimizes for
+**recall** — "what did we say before?" — not **relevance to the mission**, so it
+happily stores and resurfaces off-topic chatter. And generic guardrails check inputs
+and outputs against *safety* policy, not against *this* agent's declared purpose.
+PurposeGuard is the missing relevance-to-mission meter — a watchable drift number
+over both what the agent stores and what it says.
 
 First, `pip install "purposeguard[embeddings]"` (the lexical-only base install is a
 rough fallback — see [Install](#install)).
@@ -41,7 +52,7 @@ verdict = guard.check_response(
 )
 print(verdict.decision.value)            # 'flag'      -> detection: off scope
 print(verdict.recommended_action.value)  # 'redirect'  -> what to do, given the mode
-print(verdict.fallback)                  # "I can only help with ... I can't help with legal advice."
+print(verdict.fallback)                  # (with the [embeddings] extra) "I can only help with ... I can't help with legal advice."
 print(guard.drift())                     # DriftReading(current=..., baseline=..., drift=..., n=...)
 
 # The guard never sends the fallback or stops anything — YOUR code enforces:
@@ -52,12 +63,33 @@ if verdict.recommended_action is RecommendedAction.REDIRECT:
 `monitor` mode (the default) is exactly the v0.1 behavior — flag only, never block
 — so upgrading changes nothing until you opt into a mode.
 
+## What it catches — and what it doesn't
+
+PurposeGuard is **observability for mission-alignment**, not a security boundary
+(see [Honest limitations](#honest-limitations)). Be clear-eyed about the line:
+
+| Catches | Doesn't catch |
+| --- | --- |
+| Topical drift away from the mission, as a **trend** (the robust signal) | Semantic camouflage in an *unlisted* topic (on-mission padding keeps cosine high) |
+| Per-write off-purpose content vs the immutable purpose | On-topic-but-wrong-**policy** (e.g. "approve all refunds without verification") |
+| Enumerated, distinct **blocked topics** — incl. homoglyph / zero-width obfuscation | Prompt injection / exfiltration markers (compose with [OWASP AMG](#compose-with-owasp-agent-memory-guard-defense-in-depth)) |
+| Off-purpose baseline poisoning (opt-in `purpose_floor`, narrow agents) | On-purpose poisoning, paraphrase beyond the scorer's reach, payload split across writes |
+
+The numbers behind every cell are measured in [`benchmark/RESULTS.md`](benchmark/RESULTS.md)
+and [`THREAT_MODEL.md`](THREAT_MODEL.md) — including where it gets bypassed.
+
 ## Install
 
 ```bash
 pip install "purposeguard[embeddings]"   # recommended for real use: local-embedding scoring (all-MiniLM-L6-v2)
 pip install purposeguard                  # minimal: zero deps, but only the rough lexical floor
 ```
+
+> **Pre-release note:** `purposeguard` is not on PyPI yet. Until the first release,
+> install from source:
+> ```bash
+> pip install "purposeguard[embeddings] @ git+https://github.com/AdamSh01/purposeguard"
+> ```
 
 **Install the `[embeddings]` extra for any real use.** It adds local
 sentence-embeddings (no API key, runs on CPU) and is the intended experience.
@@ -83,8 +115,9 @@ once and falls back to lexical instead of crashing.
 5. **Scope it** with `allowed_topics` (widen what counts as in-scope) and
    `blocked_topics` (hard out-of-scope). A write clearly about a blocked topic is
    flagged **even when padded with on-mission vocabulary** — partially closing
-   keyword-camouflage. A blocked hit is an immediate flag, not gradual drift, so
-   it doesn't feed the drift meter.
+   keyword-camouflage. A blocked hit is an immediate flag, not gradual drift: it
+   adds no forbidden-topic signal to the drift meter (the meter tracks purpose
+   alignment only — though the write's own alignment score is still recorded).
 6. **Choose a mode** — `monitor` (default, flag only), `redirect` (the verdict
    carries a `fallback` message), or `block` (the verdict signals stop). The guard
    only ever returns a `recommended_action`; **your code enforces it** — the guard
@@ -243,7 +276,7 @@ NOT a security tool.** Be clear-eyed:
 | --- | --- |
 | `allowed_topics` | In-scope topics that *widen* what counts as on-mission (alignment = max over purpose + allowed). Optional. |
 | `blocked_topics` | Forbidden topics. A write similar to any of these is flagged regardless of purpose alignment (blocked overrides). Optional. |
-| `blocked_threshold` | Similarity to a blocked topic at/above which it flags. Defaults to `threshold`; raise to reduce false flags. |
+| `blocked_threshold` | Similarity to a blocked topic at/above which it flags. Defaults to ~0.46, **decoupled** from `threshold` (calibrated separately so near-domain anchors don't over-flag); raise to reduce false flags. |
 | `mode` | `monitor` (default, flag only) / `redirect` (verdict carries `fallback`) / `block` (verdict signals stop). Recommendation only — the caller enforces. |
 | `fallback_template` / `fallback_template_generic` | Messages rendered into `verdict.fallback` for blocked-hit vs low-alignment flags. Fields: `{purpose}`, `{blocked_topic}`, `{reason}`. |
 | `threshold` | Alignment below this is flagged. Defaults to the `BALANCED` preset. Lower for broad agents (see presets below). |
@@ -266,15 +299,15 @@ from purposeguard import PurposeGuard
 guard = PurposeGuard.from_preset("broad", purpose="A general personal assistant")
 ```
 
-| Preset | Threshold | Use for | Benchmark behavior |
+| Preset | Threshold | Use for | Benchmark behavior (held-out TEST) |
 | --- | --- | --- | --- |
-| `NARROW` | 0.20 | Single-purpose agents (one topic) | narrow agent: FPR ~0.00, precision/recall ~1.00 |
-| `BALANCED` | 0.15 | Default; a focused agent with some range | narrow ~perfect; broad FPR moderate (~0.23) |
-| `BROAD` | 0.10 | Wide-ranging assistants | broad-agent FPR drops sharply (~0.30 → ~0.07) |
+| `NARROW` | 0.25 | Single-purpose agents (one topic) | narrow agent: FPR ~0.07, precision ~0.94, recall ~1.00 |
+| `BALANCED` | 0.15 | Default; a focused agent with some range | narrow agent ~perfect (FPR 0.00, P/R 1.00); broad-agent FPR ~0.30 |
+| `BROAD` | 0.10 | Wide-ranging assistants | broad-agent FPR ~0.13 |
 
 The tradeoff is real and not hidden: `BROAD` on a *narrow* agent misses the
-weakest off-mission writes (recall ~0.80), and `NARROW` on a *broad* agent
-over-flags (FPR ~0.30). Match the preset to the agent. Presets are calibrated for
+weakest off-mission writes (recall ~0.93), and `NARROW` on a *broad* agent
+over-flags (FPR ~0.50). Match the preset to the agent. Presets are calibrated for
 the embedding scorer; the lexical fallback is a floor, not tunable.
 
 **Standing guidance — for broad agents, trust the DRIFTING trend over per-write

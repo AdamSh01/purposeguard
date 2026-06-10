@@ -7,7 +7,7 @@ environments that can load the model.
 
 import pytest
 
-from purposeguard import DriftReading, Decision, LexicalScorer, PurposeGuard, Verdict, Write
+from purposeguard import Decision, DriftReading, LexicalScorer, PurposeGuard, Write
 
 
 def make_guard(threshold=0.12):

@@ -21,9 +21,15 @@ Reproduce:  python benchmark/run.py
 
 from __future__ import annotations
 
+import argparse
+import json
+import os
+
 try:
+    import baselines
     from traces import TRACES
 except ImportError:  # allow `python -m benchmark.run`
+    from benchmark import baselines
     from benchmark.traces import TRACES
 
 from purposeguard import (
@@ -35,6 +41,8 @@ from purposeguard import (
     LexicalScorer,
     PurposeGuard,
 )
+
+DEFAULT_BASELINE_PATH = os.path.join(os.path.dirname(__file__), "baseline_lexical.json")
 
 DRIFT_ALPHA = 0.2
 DRIFT_BASELINE_WINDOW = 10
@@ -113,6 +121,62 @@ def _recommended(trace):
     return BROAD if trace.name.startswith("broad") else NARROW
 
 
+def collect_metrics() -> dict:
+    """Deterministic LEXICAL metrics for the held-out TEST traces, plus the trivial
+    baselines, as a machine-readable dict. Lexical so it reproduces offline and in
+    CI with no model; the embedding numbers are regenerated in the embeddings env."""
+    scorer = LexicalScorer()
+    out = {"scorer": "lexical", "threshold": BALANCED.threshold, "traces": {}}
+    for t in TRACES:
+        pg = evaluate(t, scorer, BALANCED.threshold)
+        out["traces"][t.name] = {
+            "purposeguard": {
+                k: pg[k] for k in ("fpr", "precision", "recall", "first_drift", "lead_time")
+            },
+            "keyword_baseline": baselines.metrics_from_flags(
+                baselines.keyword_flags(t.writes, t.purpose), t.labels
+            ),
+            "always_allow_baseline": baselines.metrics_from_flags(
+                baselines.always_allow_flags(t.writes), t.labels
+            ),
+        }
+    return out
+
+
+def _diff(a, b, path: str) -> list:
+    """Recursively diff two metric trees with a float tolerance (lexical metrics are
+    deterministic, so any real difference is a regression)."""
+    if isinstance(a, dict):
+        keys = sorted(set(a) | (set(b) if isinstance(b, dict) else set()))
+        out = []
+        for k in keys:
+            bv = b.get(k, "<<missing>>") if isinstance(b, dict) else "<<missing>>"
+            out += _diff(a.get(k, "<<missing>>"), bv, f"{path}.{k}" if path else k)
+        return out
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return [] if abs(a - b) <= 1e-9 else [f"{path}: {a} != {b}"]
+    return [] if a == b else [f"{path}: {a!r} != {b!r}"]
+
+
+def assert_against_baseline(path: str = DEFAULT_BASELINE_PATH) -> int:
+    """Compare freshly-computed lexical metrics to the committed baseline. Returns a
+    process exit code (0 = match) so RESULTS/numbers can't silently rot."""
+    if not os.path.exists(path):
+        print(f"[assert] no baseline at {path}; create it with:\n"
+              f"         python benchmark/run.py --json > {path}")
+        return 1
+    with open(path, encoding="utf-8") as f:
+        ref = json.load(f)
+    mismatches = _diff(collect_metrics(), ref, "")
+    if mismatches:
+        print("[assert] FAIL -- lexical metrics drifted from the committed baseline:")
+        for m in mismatches:
+            print("   " + m)
+        return 1
+    print(f"[assert] OK -- lexical metrics match {os.path.basename(path)}")
+    return 0
+
+
 def main() -> None:
     scorers = dict(get_scorers())
     print("PurposeGuard v0.1 benchmark: synthetic drift traces")
@@ -166,6 +230,22 @@ def main() -> None:
                 f"{_f(m['recall']):>8}{_drift(m['first_drift']):>8}"
             )
 
+    # 4) Baselines — PurposeGuard must beat the trivial alternatives, not just its
+    # own degraded lexical floor. Lexical PurposeGuard vs always-allow vs a keyword
+    # filter over the purpose's salient terms (all hermetic/deterministic).
+    print("\n[D] hermetic baselines vs PurposeGuard (lexical, BALANCED) - FPR / recall")
+    h = f"{'profile':<18}{'PG fpr':>8}{'PG rec':>8}{'kw fpr':>8}{'kw rec':>9}{'allow rec':>11}"
+    print(h + "\n" + "-" * len(h))
+    metrics = collect_metrics()["traces"]
+    for t in TRACES:
+        pg = metrics[t.name]["purposeguard"]
+        kw = metrics[t.name]["keyword_baseline"]
+        aa = metrics[t.name]["always_allow_baseline"]
+        print(
+            f"{t.name:<18}{_f(pg['fpr']):>8}{_f(pg['recall']):>8}"
+            f"{_f(kw['fpr']):>8}{_f(kw['recall']):>9}{_f(aa['recall']):>11}"
+        )
+
     print(
         "\nlegend: lead = writes from onset to DRIFTING firing; FLAG-FPR = "
         "on-mission writes flagged; drift? = index DRIFTING first fired."
@@ -173,4 +253,20 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="PurposeGuard benchmark")
+    parser.add_argument(
+        "--json", action="store_true",
+        help="emit machine-readable lexical metrics + baselines (JSON)",
+    )
+    parser.add_argument(
+        "--assert", dest="assert_", action="store_true",
+        help="fail (exit 1) if lexical metrics drift from the committed baseline",
+    )
+    parser.add_argument("--baseline", default=DEFAULT_BASELINE_PATH)
+    args = parser.parse_args()
+    if args.json:
+        print(json.dumps(collect_metrics(), indent=2, sort_keys=True))
+    elif args.assert_:
+        raise SystemExit(assert_against_baseline(args.baseline))
+    else:
+        main()

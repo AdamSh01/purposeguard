@@ -20,13 +20,21 @@ from sentence_transformers import SentenceTransformer
 
 try:
     from traces import (
-        PURPOSE_ROUTER, PURPOSE_WELLNESS, ROUTER_ON_MISSION, TRAIN_OFF_MISSION,
-        TRAIN_TRACES, WELLNESS_ON_MISSION,
+        PURPOSE_ROUTER,
+        PURPOSE_WELLNESS,
+        ROUTER_ON_MISSION,
+        TRAIN_OFF_MISSION,
+        TRAIN_TRACES,
+        WELLNESS_ON_MISSION,
     )
 except ImportError:
     from benchmark.traces import (
-        PURPOSE_ROUTER, PURPOSE_WELLNESS, ROUTER_ON_MISSION, TRAIN_OFF_MISSION,
-        TRAIN_TRACES, WELLNESS_ON_MISSION,
+        PURPOSE_ROUTER,
+        PURPOSE_WELLNESS,
+        ROUTER_ON_MISSION,
+        TRAIN_OFF_MISSION,
+        TRAIN_TRACES,
+        WELLNESS_ON_MISSION,
     )
 
 from purposeguard import EmbeddingScorer
@@ -59,8 +67,8 @@ def main():
     for t in TRAIN_TRACES:
         ref = model.encode(t.purpose, normalize_embeddings=True)
         cos = [float(np.dot(model.encode(w, normalize_embeddings=True), ref)) for w in t.writes]
-        on = [c for c, l in zip(cos, t.labels) if l == 0]
-        off = [c for c, l in zip(cos, t.labels) if l == 1]
+        on = [c for c, lab in zip(cos, t.labels) if lab == 0]
+        off = [c for c, lab in zip(cos, t.labels) if lab == 1]
         per[t.name] = (cos, t.labels, on, off)
         if "narrow" in t.name:
             narrow_on += on
@@ -90,11 +98,11 @@ def main():
             sc = [rescale(c) for c in cos]
             flags = [s < thr for s in sc]
             onc = labels.count(0)
-            fp = sum(1 for f, l in zip(flags, labels) if f and l == 0)
+            fp = sum(1 for f, lab in zip(flags, labels) if f and lab == 0)
             fpr = fp / onc if onc else float("nan")
             if labels.count(1):
-                tp = sum(1 for f, l in zip(flags, labels) if f and l == 1)
-                fn = sum(1 for f, l in zip(flags, labels) if not f and l == 1)
+                tp = sum(1 for f, lab in zip(flags, labels) if f and lab == 1)
+                fn = sum(1 for f, lab in zip(flags, labels) if not f and lab == 1)
                 prec = tp / (tp + fp) if (tp + fp) else float("nan")
                 rec = tp / (tp + fn) if (tp + fn) else float("nan")
                 cells["d"] = f"{fpr:.2f}/{prec:.2f}/{rec:.2f}"
@@ -125,10 +133,10 @@ def calibrate_blocked_threshold():
     lo = sorted(legit_offscope)
     p95 = lo[min(len(lo) - 1, int(0.95 * len(lo)))]
     print("\n=== blocked_threshold calibration (TRAIN: router + wellness) ===")
-    print(f"legit on-mission vs OFF-scope anchors (false-positive pressure):")
+    print("legit on-mission vs OFF-scope anchors (false-positive pressure):")
     print(f"  n={len(legit_offscope)}  median={st.median(legit_offscope):.3f}  "
           f"p95={p95:.3f}  max={max(legit_offscope):.3f}")
-    print(f"real blocked content vs its anchor (must stay catchable):")
+    print("real blocked content vs its anchor (must stay catchable):")
     print(f"  n={len(true_blocked)}  min={min(true_blocked):.3f}  "
           f"median={st.median(true_blocked):.3f}")
     # A default just above the legit p95 separates legit traffic from blocked
@@ -159,7 +167,6 @@ def calibrate_purpose_floor():
     poison_r = ema_trajectory(TRAIN_OFF_MISSION, PURPOSE_ROUTER)      # off-purpose stream
     poison_w = ema_trajectory(TRAIN_OFF_MISSION, PURPOSE_WELLNESS)
 
-    import statistics as st
     broad_min = min(wellness)         # deepest legit broad EMA dip -> floor must be BELOW this
     narrow_min = min(router)
     poison_settle = max(poison_r[-1], poison_w[-1])  # where poison EMA lands -> floor ABOVE this

@@ -45,6 +45,18 @@ class DriftReading:
         floor configured -> always False."""
         return self.purpose_floor is not None and self.current < self.purpose_floor
 
+    def to_dict(self) -> dict:
+        """JSON-friendly view (primitives only) for logging/observability."""
+        return {
+            "current": self.current,
+            "baseline": self.baseline,
+            "drift": self.drift,
+            "samples": self.samples,
+            "purpose_floor": self.purpose_floor,
+            "drifting": self.drifting,
+            "anchored_drifting": self.anchored_drifting,
+        }
+
     def __str__(self) -> str:
         # ASCII-only markers on purpose: __str__ is an emitted output path, and a
         # non-ASCII glyph here crashes on a Windows cp1252 console (guardrail #4).
@@ -72,6 +84,12 @@ class DriftMeter:
         baseline_window: int = 10,
         purpose_floor: float | None = None,
     ) -> None:
+        if not (0.0 < alpha <= 1.0):
+            raise ValueError(f"alpha must be in (0.0, 1.0], got {alpha!r}")
+        if baseline_window < 1:
+            raise ValueError(f"baseline_window must be >= 1, got {baseline_window!r}")
+        if purpose_floor is not None and not (0.0 <= purpose_floor <= 1.0):
+            raise ValueError(f"purpose_floor must be in [0.0, 1.0], got {purpose_floor!r}")
         self.alpha = alpha
         self.baseline_window = baseline_window
         # Absolute floor for the purpose-anchored signal (None disables it). NOT a
@@ -126,3 +144,34 @@ class DriftMeter:
             samples=self._samples,
             purpose_floor=self.purpose_floor,
         )
+
+    def state(self) -> dict:
+        """Serialize the full rolling state so the trend survives a process restart.
+
+        Drift is a long-horizon signal: a guard rebuilt fresh each request (or after
+        a redeploy) loses its baseline window and EMA and starts the trend over.
+        Persist this dict and rehydrate with :meth:`from_state`.
+        """
+        return {
+            "alpha": self.alpha,
+            "baseline_window": self.baseline_window,
+            "purpose_floor": self.purpose_floor,
+            "ema": self._ema,
+            "baseline_sum": self._baseline_sum,
+            "baseline_n": self._baseline_n,
+            "samples": self._samples,
+        }
+
+    @classmethod
+    def from_state(cls, state: dict) -> "DriftMeter":
+        """Rebuild a meter from :meth:`state`, restoring the EMA/baseline/sample count."""
+        meter = cls(
+            alpha=state["alpha"],
+            baseline_window=state["baseline_window"],
+            purpose_floor=state.get("purpose_floor"),
+        )
+        meter._ema = state["ema"]
+        meter._baseline_sum = state["baseline_sum"]
+        meter._baseline_n = state["baseline_n"]
+        meter._samples = state["samples"]
+        return meter

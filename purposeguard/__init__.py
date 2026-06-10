@@ -1,4 +1,8 @@
-"""PurposeGuard — a framework-agnostic drift guard for AI agent memory.
+"""PurposeGuard — a framework-agnostic drift + scope guardrail for AI agents.
+
+Purpose/mission observability: score every memory write and agent response against
+a declared purpose (and optional allowed/blocked topics), surface drift as a
+watchable trend, and — when you opt in — recommend (never enforce) a redirect/block.
 
 This module is the public surface of the library. Everything an adopter needs is
 re-exported here so the common case is a single import:

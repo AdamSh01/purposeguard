@@ -73,9 +73,12 @@ def test_allowed_topics_confirm_borderline_in_scope_content():
     assert withlist.details["allowed"]["score"] >= withlist.details["threshold"]
 
 
-def test_blocked_hit_does_not_feed_the_drift_meter():
-    """Decision: a blocked hit is a hard flag, not drift. The meter still tracks
-    ALIGNMENT, so a purpose-similar-but-blocked write keeps drift high, not low."""
+def test_blocked_hit_still_records_alignment_in_drift_meter():
+    """Design decision (kept): a blocked hit adds NO forbidden-topic signal to the
+    drift meter — but the write's own ALIGNMENT score IS still recorded. So a
+    purpose-similar-but-blocked (camouflage) write keeps drift HIGH, not low; the
+    blocked anchor handles the hard flag separately. (The old name 'does_not_feed'
+    was misleading — the meter is fed, just with alignment, not the blocked score.)"""
     g = guard(blocked_topics=BLOCKED)
     camo = "billing payment invoice refund — weather forecast vacation"
     v = g.check(camo)
